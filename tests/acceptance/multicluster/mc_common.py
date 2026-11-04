@@ -96,15 +96,23 @@ def edge_clusters() -> List[Dict[str, str]]:
 
 
 @contextmanager
-def xnet_client_cert() -> Iterator[Tuple[str, str]]:
-    """Materialise xnet's tunnel client cert from the center cluster into a temp dir."""
-    secret = kubectl_json("center", "get", "secret", "xnet-client-cert", "-n", "xnet")["data"]
+def xnet_client_cert(namespace: str = "aiops") -> Iterator[Tuple[str, str]]:
+    """The tunnel client cert the runtime uses (Secret aiops-xnet-client-cert, from make mc-cert).
+
+    Not xnet's own ``xnet/xnet-client-cert``: the tests exercise the same identity as MCP and AIOps.
+    """
+    secret = secret_data("center", namespace, "aiops-xnet-client-cert")
     with tempfile.TemporaryDirectory() as tmp:
         cert, key = Path(tmp, "cert.pem"), Path(tmp, "key.pem")
-        cert.write_bytes(base64.b64decode(secret["cert.pem"]))
-        key.write_bytes(base64.b64decode(secret["key.pem"]))
+        cert.write_bytes(secret["cert.pem"])
+        key.write_bytes(secret["key.pem"])
         key.chmod(0o600)
         yield str(cert), str(key)
+
+
+def secret_data(cluster: str, namespace: str, name: str) -> Dict[str, bytes]:
+    data = kubectl_json(cluster, "get", "secret", name, "-n", namespace)["data"]
+    return {k: base64.b64decode(v) for k, v in data.items()}
 
 
 def tunnel_get(

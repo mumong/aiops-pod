@@ -92,8 +92,8 @@ curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 | 改了 `config.yaml`、Runbook 或 `core.yaml` | 单集群 `make deploy`，多集群中心 `make deploy-mc`（Agent 仓库） |
 | 新增一个边缘 | 中心：`make mc-discover WRITE=1`（更新 `clusters.mc.yaml` 中 ### 之间的集群列表，会覆盖手改的别名） → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → 新边缘节点上执行 `mc-init` 打印的 `make edge-deploy EDGE=local RUNNER_KEY=…` |
 | 修改高危命令规则（`workflow.remediation`） | 中心 `make deploy-mc`，并对每个边缘重新执行 `make edge-deploy`（规则随 runner 下发） |
-| xnet 证书轮换 | Agent 仓库和 MCP 仓库各执行 `make deploy-mc` |
-| 使用运维提供的专用 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |
+| 重新申请 AIOps 专用 xnet 证书（到期前 30 天内 `mc-init` 会自动申请；xnet 重装后也要执行） | Agent 仓库 `make mc-cert RENEW=1`，再在 Agent 仓库和 MCP 仓库各执行 `make deploy-mc` |
+| 使用运维提供的 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |
 | 查看日志 | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
 | 卸载 | 各仓库执行 `make delete`（保留报告 PVC）；边缘执行 `make edge-delete EDGE=<别名>` |
 | 升级边缘 runner | 改 `deploy-edge/VERSION`，`make runner-build runner-push`，再在每个边缘重新执行 `make edge-deploy` |

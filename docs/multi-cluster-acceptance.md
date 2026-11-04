@@ -88,6 +88,7 @@
 |---|---|---|
 | `env_check.py` | 环境基线：三个集群在线、xnet 隧道可用、VM/VLogs 有数据、已知噪声清单；输出 `xnet`、`monitor` 命名空间的对象快照（X1 用） | P0 |
 | `contract_xnet.py` | A15：`/proxy` 可用、不带证书被拒、Node 名与 UUID 可以互相转换、`cluster` 标签与 Node 名一致 | P0 |
+| `contract_xnet_cert.py` | A16：隧道证书是 AIOps 自己经 xnet 签发接口申请的，不是 xnet-management 的；由 xnet CA 签发、clientAuth、剩余 30 天以上；MCP 和 AIOps Pod 挂载的就是它；用它经 `/proxy` 到达每个边缘 runner（含签名的 `/v1/kubectl`）；再申请一张一次性证书，中心 Node 和 xnet 命名空间对象不变 | 2026-11-04 补 |
 | `contract_backends.py` | VM 的 `extra_label` 生效；VLogs 能按集群查询事件；常用指标在新旧两套后端上都存在 | P1 |
 | `tools_direct.py` | L2：逐个调用 MCP 工具和 runner 接口并断言结果 | P0 起逐步扩充 |
 | `e2e_ask.py` | L3：用 `/ask` 提问，从运行报告中取出路由范围、工具调用的集群参数和结论，并做断言 | P2 |
@@ -126,7 +127,7 @@
 
 | # | 操作 | 预期 |
 |---|---|---|
-| P0-1 | `make sync-xnet-cert KUBECONFIG=<center>` | 中心的 `mcp` 和 `aiops` 命名空间出现复制的证书；xnet 命名空间没有变化 |
+| P0-1 | `make mc-init`（旧名 `sync-xnet-cert`） | 中心的 `mcp` 和 `aiops` 命名空间出现 AIOps 专用证书（2026-11-04 前为复制的 xnet 证书）；xnet 命名空间没有变化 |
 | P0-2 | `make edge-deploy KUBECONFIG=<edge-88>` | runner 运行正常；只有 ClusterIP，没有 NodePort |
 | P0-3 | 中心执行 `AIOPS_CLUSTER=<edge-88> kubectl get pods -A` | 返回 edge-88 的 Pod 列表，退出码 0 |
 | P0-4 | `AIOPS_CLUSTER=<edge-88> kubectl get pods -A \| jq ...` | 管道在本地正常处理 |
@@ -135,6 +136,7 @@
 | P0-7 | 只读接口执行 `kubectl delete pod ...` | 403，`mode=read` 不允许写操作 |
 | P0-8 | 不设置 `AIOPS_CLUSTER` 执行 `kubectl get ns` | 返回中心结果（行为不变） |
 | A15 | `contract_xnet.py` | 全部通过 |
+| A16 | `contract_xnet_cert.py` | 全部通过 |
 
 ### 4.3 P1 可观测适配（MCP）
 

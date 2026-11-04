@@ -61,7 +61,7 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make mc-discover WRITE=1     # 已接入的集群写入 deploy-edge/clusters.mc.yaml（### 之间）
-make mc-init                 # 证书、密钥、集群配置；最后打印边缘要执行的命令
+make mc-init                 # 专用 xnet 证书（经 xnet 接口申请）、密钥、集群配置；最后打印边缘要执行的命令
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc

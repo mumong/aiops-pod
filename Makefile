@@ -236,9 +236,13 @@ RUNNER_LEVEL ?= 2
 # 历史版本与各等级用过的绑定名；切换等级前先删除（ClusterRoleBinding 的 roleRef 不能原地修改）
 RUNNER_BINDINGS := aiops-edge-runner-read aiops-edge-runner-read-view aiops-edge-runner-write aiops-edge-runner-view aiops-edge-runner-read-cluster
 MC_CLUSTERS_FILE ?= deploy-edge/clusters.mc.yaml
-# 交付时可由运维提供 AIOps 专用的 xnet 客户端证书：目录内含 cert.pem、key.pem、ca.pem；
-# 不设则从中心 xnet 命名空间复制 xnet-management 的客户端证书（见设计文档 §18.2）
+# 隧道客户端证书（见设计文档 §18.2）：默认由 make mc-cert 通过 xnet 的签发接口申请 AIOps 专用证书，
+# 存放在本机运维目录 $(MC_XNET_CERT_DIR)；运维另行提供时设 XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>。
+# 不再复制 xnet-management 自己的客户端证书。
 XNET_CERT_DIR ?=
+MC_XNET_CERT_DIR ?= $(MC_KUBE_DIR)/xnet-cert
+# xnet-management API；不设则用中心 Service xnet/xnet-management 的 NodePort（8080 端口）
+XNET_API ?=
 RUNNER_VERSION ?= $(shell cat deploy-edge/VERSION)
 RUNNER_IMAGE := $(IMAGE_REPOSITORY)/$(PROJECT)/aiops-edge-runner
 # 测试环境用自己的 Harbor（无推送权限），镜像经 SSH 导入节点缓存：MC_PULL_POLICY=IfNotPresent MC_LOAD_HOSTS=10.2.5.88
@@ -248,7 +252,7 @@ MC_A2A_PUBLIC_URL ?=
 # 同一台机器同时部署单集群和多集群中心、两边模型不同时，把中心的放进前者，不用来回替换。
 MC_SECRET_FILE ?= $(or $(wildcard deploy-edge/center/secret.yaml),deploy/secrets/core.yaml)
 MC_LOAD_HOSTS ?=
-.PHONY: runner-build runner-push mc-keygen mc-discover mc-init edge-target edge-deploy edge-delete sync-xnet-cert test-multicluster deploy-mc
+.PHONY: runner-build runner-push mc-keygen mc-cert mc-discover mc-init edge-target edge-deploy edge-delete sync-xnet-cert test-multicluster deploy-mc
 
 runner-build:
 	$(DOCKER_BUILD) --build-arg VERSION=$(RUNNER_VERSION) -f Dockerfile.edge-runner -t $(RUNNER_IMAGE):$(RUNNER_VERSION) .
@@ -303,22 +307,33 @@ edge-delete: edge-target
 	$(EDGE_KUBECTL) delete clusterrole aiops-edge-runner-read-l1 aiops-edge-runner-read-l2 aiops-edge-runner-write-l2 aiops-edge-runner-read-l3 aiops-edge-runner-write aiops-edge-runner-read-cluster --ignore-not-found
 	$(EDGE_KUBECTL) -n aiops delete configmap aiops-edge-runner-policy secret aiops-edge-key --ignore-not-found
 
+# AIOps 专用的 xnet 隧道客户端证书：本机 $(MC_XNET_CERT_DIR) 里的证书有效（剩余 30 天以上）就沿用，
+# 否则登录 xnet-management API 申请一张新的（POST /api/v1/registry/certificate，只签发证书，不在 xnet 中创建对象）。
+# 账号默认读取中心 Secret xnet/xnet-account，也可用 XNET_USERNAME / XNET_PASSWORD 指定；RENEW=1 强制重新申请。
+mc-cert:
+	@if test -n "$(XNET_CERT_DIR)"; then $(PYTHON) deploy-edge/xnet_cert.py check $(XNET_CERT_DIR); exit $$?; fi; \
+	set -e; K="$(CENTER_KUBECTL)"; API="$(XNET_API)"; \
+	if test -z "$$API"; then \
+		API="http://$$($$K get nodes -l '!node-role.kubernetes.io/xnet-agent' \
+			-o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}'):$$($$K -n xnet get svc xnet-management \
+			-o jsonpath='{.spec.ports[?(@.port==8080)].nodePort}')"; fi; \
+	if test -z "$$XNET_USERNAME" || test -z "$$XNET_PASSWORD"; then \
+		XNET_USERNAME=$$($$K -n xnet get secret xnet-account -o jsonpath='{.data.username}' | base64 -d); \
+		XNET_PASSWORD=$$($$K -n xnet get secret xnet-account -o jsonpath='{.data.password}' | base64 -d); fi; \
+	export XNET_USERNAME XNET_PASSWORD; \
+	$(PYTHON) deploy-edge/xnet_cert.py ensure --out $(MC_XNET_CERT_DIR) --api "$$API" $(if $(RENEW),--renew)
+
 # 中心的共享对象，MCP（mcp）和 AIOps（aiops）两个命名空间各一份，可重复执行：
-#   Secret aiops-xnet-client-cert（xnet 客户端证书）、Secret aiops-edge-key（runner 签名密钥）、
-#   ConfigMap aiops-clusters（集群配置 $(MC_CLUSTERS_FILE)）
+#   Secret aiops-xnet-client-cert（AIOps 专用 xnet 客户端证书，来自 mc-cert 或 XNET_CERT_DIR）、
+#   Secret aiops-edge-key（runner 签名密钥）、ConfigMap aiops-clusters（集群配置 $(MC_CLUSTERS_FILE)）
 # 只读 xnet，不在 xnet 命名空间创建任何对象。集群配置或证书变化后重新执行，再重启 MCP 和 AIOps。
-mc-init: mc-keygen
+mc-init: mc-keygen mc-cert
 	@test -f $(MC_CLUSTERS_FILE) || { echo "缺少集群配置 $(MC_CLUSTERS_FILE)（make mc-discover 可列出已接入的集群）" >&2; exit 1; }
 	@! sed -n '/### 替换开始/,/### 替换结束/p' $(MC_CLUSTERS_FILE) | grep -v '^ *#' | grep -q '<' || \
 		{ echo "集群配置 $(MC_CLUSTERS_FILE) 还是模板占位：先执行 make mc-discover WRITE=1（或手动替换 ### 之间的内容）" >&2; exit 1; }
-	@set -e; d=$$(mktemp -d); trap 'rm -rf $$d' EXIT; K="$(CENTER_KUBECTL)"; \
-	if test -n "$(XNET_CERT_DIR)"; then \
-		cp $(XNET_CERT_DIR)/cert.pem $(XNET_CERT_DIR)/key.pem $(XNET_CERT_DIR)/ca.pem $$d/; \
-	else \
-		$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/cert.pem; \
-		$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.key\.pem}' | base64 -d > $$d/key.pem; \
-		$$K -n xnet get secret xnet-ca-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$d/ca.pem; \
-	fi; \
+	@set -e; d=$(or $(XNET_CERT_DIR),$(MC_XNET_CERT_DIR)); t=$$(mktemp -d); trap 'rm -rf $$t' EXIT; K="$(CENTER_KUBECTL)"; \
+	$$K -n xnet get secret xnet-client-cert -o jsonpath='{.data.cert\.pem}' | base64 -d > $$t/xnet-own.pem || true; \
+	$(PYTHON) deploy-edge/xnet_cert.py check $$d --not-same-as $$t/xnet-own.pem; \
 	for ns in mcp aiops; do \
 		$$K create namespace $$ns --dry-run=client -o yaml | $$K apply -f - >/dev/null; \
 		$$K -n $$ns create secret generic aiops-xnet-client-cert --from-file=$$d/cert.pem --from-file=$$d/key.pem \
@@ -328,7 +343,7 @@ mc-init: mc-keygen
 		$$K -n $$ns create configmap aiops-clusters --from-file=clusters.yaml=$(MC_CLUSTERS_FILE) \
 			--dry-run=client -o yaml | $$K apply -f - >/dev/null; \
 	done; \
-	echo "mc-init: mcp、aiops 命名空间已更新（xnet 证书、签名密钥、集群配置）；证书有效期至 $$(openssl x509 -noout -enddate -in $$d/cert.pem | cut -d= -f2)"
+	echo "mc-init: mcp、aiops 命名空间已更新（AIOps 专用 xnet 证书、签名密钥、集群配置）"
 	@echo "边缘部署 runner：在每个边缘节点的 holmegpt-agent 目录执行（不需要 kubeconfig）："
 	@echo "  make edge-deploy EDGE=local RUNNER_KEY=$$(cat $(MC_KEY_FILE))"
 

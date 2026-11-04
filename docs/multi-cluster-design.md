@@ -21,7 +21,7 @@
 
 | 边界 | 含义 |
 |---|---|
-| 不修改 xnet-cloud，也不要求它做任何适配 | 不改它的代码、配置和数据，不在 xnet 命名空间创建对象，不使用 Vessel。只以调用方身份使用它已有的能力：隧道 `/proxy`、客户端证书、虚拟 Node |
+| 不修改 xnet-cloud，也不要求它做任何适配 | 不改它的代码、配置和数据，不在 xnet 命名空间创建对象，不使用 Vessel。只以调用方身份使用它已有的能力：隧道 `/proxy`、证书签发接口、虚拟 Node |
 | 不修改可观测组件的采集逻辑 | 某个集群没有的数据，如实返回"未提供" |
 | 单集群行为不变 | 没有集群配置时，路由 schema、提示词、工具 schema、工具结果和 kubectl 调用与改造前一致 |
 | 运行时不依赖边缘 kubeconfig | 中心到边缘只经过 xnet 隧道和我们的 runner（验收 X3 检查） |
@@ -38,7 +38,7 @@
 │ AIOps 后端：路由 / 诊断 / 修复执行器         │              │   主动外连中心隧道（wss）            │
 │ MCP：可观测工具 → 中心 vmselect / vlsingle  │   xnet 隧道   │        │ 把中心的 HTTP 请求转成     │
 │      K8s 工具 → kubectl 垫片               │◀────────────▶│        ▼ 边缘集群内的 HTTP 调用     │
-│ 两者都挂载：集群配置、xnet 证书副本、签名密钥 │  （边缘外连）  │ aiops-edge-runner（我们的）         │
+│ 两者都挂载：集群配置、专用 xnet 证书、签名密钥 │  （边缘外连）  │ aiops-edge-runner（我们的）         │
 │ xnet-management（不改）                    │              │   校验签名 → 规则检查 → kubectl     │
 │ VictoriaMetrics / VictoriaLogs（不改）     │              │ vmagent / vlagent（不改，推到中心） │
 └──────────────────────────────────────────┘              └──────────────────────────────────┘
@@ -108,7 +108,7 @@ expected_states: [...]             # 运维声明的预期状态，见 §11
 |---|---|---|
 | 1 | （xnet 侧完成 join） | 边缘的 xnet-agent 已经外连中心隧道，中心出现该边缘的虚拟 Node |
 | 2 | `make mc-discover` | 读取虚拟 Node，打印可粘贴的集群配置条目（名称、角色、建议别名、在线状态）；只读 |
-| 3 | 更新 `clusters.mc.yaml`，Agent 仓库 `make deploy-mc`，MCP 仓库 `make deploy-mc` | Agent 的 `deploy-mc` 先执行 `mc-init`：把集群配置、xnet 客户端证书、签名密钥写进 `mcp` 和 `aiops` 命名空间（签名密钥本机没有时从中心 Secret 取回，中心也没有才生成） |
+| 3 | 更新 `clusters.mc.yaml`，Agent 仓库 `make deploy-mc`，MCP 仓库 `make deploy-mc` | Agent 的 `deploy-mc` 先执行 `mc-init`：把集群配置、AIOps 专用 xnet 客户端证书（本机没有或剩余不足 30 天时经 xnet 签发接口申请，见 §18.2）、签名密钥写进 `mcp` 和 `aiops` 命名空间（签名密钥本机没有时从中心 Secret 取回，中心也没有才生成） |
 | 4 | `make edge-deploy EDGE=<名字>` | 在边缘部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 和 ClusterIP Service |
 
 完整的部署步骤见 [README 多集群部署](../README.md#快速开始)。
@@ -210,7 +210,7 @@ runner 有两个身份：reader 执行读命令和 client dry run；writer 执�
 POST https://xnet-management.xnet.svc:9090/proxy
      ?clientid=<集群 UUID>
      &address=http://aiops-edge-runner.aiops.svc:8090/v1/kubectl
-TLS：xnet CA 签发的客户端证书（mTLS，从 xnet 复制来的副本）
+TLS：xnet CA 签发给 AIOps 的客户端证书（mTLS，经 xnet 签发接口申请，见 §18.2）
 请求头：X-AIOps-Timestamp、X-AIOps-Nonce、
         X-AIOps-Signature = HMAC-SHA256(密钥, 时间戳 + nonce + 方法 + 路径 + sha256(请求体))
 请求体：{"argv": [...], "mode": "read", "timeout_s": 15, "compress": true}
@@ -389,7 +389,8 @@ expected_states:
 | 持有 xnet 客户端证书的人可以访问边缘任意 Service | runner 要求 HMAC 签名并防重放；只有证书、没有密钥就调用不了 |
 | 中心被绕过，直接调用 runner | runner 本地执行同一套命令规则；需审批的命令必须带审批 ID |
 | runner 被滥用 | reader / writer 两个最小权限身份；只读接口不会使用 writer |
-| 证书泄露范围 | 证书复制到我们自己的命名空间，只挂载给 MCP 和 AIOps；我们的 SA 不需要读取 xnet 命名空间 |
+| 证书泄露范围 | 证书是 AIOps 自己的密钥对，只放在我们自己的命名空间、只挂载给 MCP 和 AIOps；我们不持有 xnet-management 的私钥，运行时的 SA 不读取 xnet 命名空间 |
+| 借用 xnet-management 的身份 | `mc-init` 比对指纹，拒绝把 xnet-management 自己的客户端证书写进我们的 Secret（验收 A16） |
 | 跨集群混用数据 | 工具层强制注入集群；VictoriaMetrics 用 `extra_label` 限定 |
 | Secret 值进入模型或归档 | 工具结果进入 AIOps 时统一脱敏（`context/secret_redaction.py`，在工具中间件里执行，早于模型、缓存、归档和事件流）：Secret 对象只保留键名，值替换为 `<redacted: N bytes>`，删除 `last-applied-configuration`；无法解析的 Secret 输出整体替换。起因：run `ef5cbfed`（runner 2 级）里，较短的 Secret YAML 走了原文直通路径，模型看到了 base64 值和注解里的明文。中心集群的 MCP 一直是管理员权限，同样受影响 |
 | xnet 自身的问题 | **我们无法解决**：xnet-agent 拥有边缘集群的全部权限，JWT 密钥硬编码。我们只能保证"经过我们系统的操作是受控的" |
@@ -402,7 +403,8 @@ expected_states:
 |---|---|
 | `make runner-build` / `runner-push` | 构建 / 推送 runner 镜像（`Dockerfile.edge-runner`，版本见 `deploy-edge/VERSION`） |
 | `make mc-discover` | 列出 xnet 已接入的集群，输出配置条目（只读） |
-| `make mc-init` | 中心：集群配置、xnet 证书（或 `XNET_CERT_DIR`）、签名密钥写进 `mcp`、`aiops`；可重复执行（旧名 `sync-xnet-cert`） |
+| `make mc-cert` | 本机 `~/.kube/aiops-mc/xnet-cert` 里的 AIOps 专用 xnet 证书有效（剩余 30 天以上）就沿用，否则经 xnet 签发接口申请；`RENEW=1` 强制重新申请（`mc-init` 会自动调用） |
+| `make mc-init` | 中心：集群配置、AIOps 专用 xnet 证书（`mc-cert` 或 `XNET_CERT_DIR`）、签名密钥写进 `mcp`、`aiops`；可重复执行（旧名 `sync-xnet-cert`） |
 | `make deploy-mc` | 中心：部署 AIOps（先执行 `mc-init`）；mcpstander、frountind 各有同名目标，MCP 的会先检查共享对象是否存在 |
 | `make edge-deploy` / `edge-delete EDGE=…` | 在边缘部署 / 卸载 runner；`EDGE=local` 表示当前上下文；不指定就报错 |
 | `make mc-keygen` | 签名密钥：本机没有时从中心 Secret 取回，中心也没有才生成（`mc-init` 会自动调用） |
@@ -477,10 +479,24 @@ xnet 在这套设计里只承担一件事：**把中心的一次 HTTP 请求送�
 
 ### 18.2 xnet 证书从哪来
 
-- **中心侧**（MCP、AIOps）调用 `/proxy` 需要 xnet CA 签发的客户端证书。`make mc-init` 默认复制的是 xnet-management 自己调用隧道用的 `xnet-client-cert`（CN=localhost，Test CA 签发，有效期到 2031 年），复制到 `mcp`、`aiops` 两个命名空间，只挂载给 MCP 和 AIOps。
-- **边缘 runner 不使用任何 xnet 证书**。它只认我们自己的 HMAC 签名密钥（`aiops-edge-key`），所以只持有 xnet 证书的人调用不了 runner。
-- **边缘的 xnet-agent** 用的是它加入时由 xnet 签发的证书，跟我们无关。
-- **评价**：复制 xnet 内部使用的客户端身份，是测试环境下的便捷做法。交付时建议由运维提供一张专门给 AIOps 的客户端证书，用 `make mc-init XNET_CERT_DIR=<目录>` 放进 Secret `aiops-xnet-client-cert`；从 xnet 复制只是不设该变量时的默认来源。代码只读取 Secret，不关心证书来自哪里。
+**xnet 的设计**（读 xnet-cloud 源码，与中心部署的版本 `f349016` 一致；swarm-tunnel 隧道库）：
+
+| xnet 的能力 | 认证方式 | 给谁用 |
+|---|---|---|
+| 隧道 `:9090/proxy?clientid=&address=` | TLS 层 `RequireAndVerifyClientCert`：任何 xnet CA 签发的客户端证书都放行，不再区分调用方 | xnet-management 进程内部（`https://localhost:…/proxy`），用它启动时生成的 `xnet/xnet-client-cert` |
+| 隧道 `:9090/register` | 同上，另外核对证书扩展里的 clientid 与 JWT，首次连接时创建虚拟 Node | 边缘 xnet-agent |
+| REST `:8080/api/v1/*` | `POST /api/v1/auth/login` 换 JWT（账号在 `xnet/xnet-account`） | 前端和外部调用方；只有节点、BMC、任务、监控等固定功能，**没有通用转发**，到不了我们的 runner |
+| `POST /api/v1/registry/certificate` | JWT | 申请接入证书（README"申请接入证书"、`apply-agent-cert.sh`）：用 xnet CA 签发一对**新的**密钥和证书（CN=localhost、clientAuth、有效期默认 5 年），只返回证书，不创建 Node、Secret 或其他对象 |
+
+**我们的做法**：`make mc-cert` 登录 REST API，调用 `POST /api/v1/registry/certificate`（`alias=aiops-center`，描述写明"AIOps 调用方，不是集群，不用于 /register"），得到 AIOps 自己的客户端证书，保存在本机运维目录 `~/.kube/aiops-mc/xnet-cert`（0600，含 `meta.json` 记录 clientid 与来源）；`mc-init` 校验后写进 `mcp`、`aiops` 的 Secret `aiops-xnet-client-cert`。实现见 `deploy-edge/xnet_cert.py`。
+
+- **为什么不复制 `xnet/xnet-client-cert`**：那是 xnet-management 自己的身份。复制它等于持有 xnet 的私钥、以 xnet 的名义走隧道；xnet 轮换它时我们会跟着断。`mc-init` 现在比对指纹，拒绝写入这张证书，只读取它的公开部分做比对，不读私钥。
+- **这张证书只用于 `/proxy`**。我们从不调用 `/register`，所以不会出现虚拟 Node。证书扩展里带有申请时的登录 JWT（xnet 的签发逻辑写入），这个 JWT 按 xnet 的令牌有效期过期，过期后不影响 `/proxy`。
+- **账号**：默认读取中心 `xnet/xnet-account`（只读，只在部署时由运维机读取，不进入镜像、ConfigMap 或日志），也可用 `XNET_USERNAME` / `XNET_PASSWORD` 指定。运行时不需要账号。
+- **有效期与轮换**：每次 `mc-init` 检查证书，剩余不足 30 天就重新申请；`make mc-cert RENEW=1` 立即重新申请，之后执行 `mc-init` 并重启 MCP 和 AIOps。xnet 的 CA 换了（重装 xnet）也一样重新申请。
+- **运维另行提供证书时**：`make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>`，同样经过校验（由 ca.pem 签发、clientAuth、剩余 30 天以上、私钥匹配、不是 xnet-management 的证书）。
+- **边缘 runner 不使用任何 xnet 证书**。它只认我们自己的 HMAC 签名密钥（`aiops-edge-key`），所以只持有 xnet 证书的人调用不了 runner。边缘的 xnet-agent 用它加入时由 xnet 签发的证书，跟我们无关。
+- **仍然存在的限制（xnet 的，不归我们改）**：`/proxy` 不区分调用方，xnet 也没有吊销机制；证书泄露时只能靠 runner 的签名挡住，或者重装 xnet 换 CA。若 xnet 以后提供"第三方调用方证书"或带鉴权的通用转发接口，换成它即可，代码只读取 Secret，不用改。
 
 ### 18.3 部署方式
 
@@ -497,7 +513,7 @@ xnet 在这套设计里只承担一件事：**把中心的一次 HTTP 请求送�
 | 位置 | 命令 | 作用 |
 |---|---|---|
 | 中心 | Agent 仓库 `make mc-discover`，按输出更新集群配置 | 不用手查虚拟 Node 名 |
-| 中心 | Agent 仓库 `make mc-init` | 把集群配置、xnet 证书、签名密钥放进 `mcp`、`aiops` 两个命名空间；证书不需要手动处理 |
+| 中心 | Agent 仓库 `make mc-init` | 把集群配置、AIOps 专用 xnet 证书（自动申请或沿用）、签名密钥放进 `mcp`、`aiops` 两个命名空间；证书不需要手动处理 |
 | 中心 | mcpstander、holmegpt-agent、aiops-frount 依次执行 `make deploy-mc` | 与单集群相同的镜像，额外挂载上述对象 |
 | 每个边缘 | `make edge-deploy EDGE=<名字>` | 部署 runner |
 
