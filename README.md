@@ -34,7 +34,7 @@
 
 ## 快速开始
 ### 环境要求
-- Kubernetes 集群；部署机有 `git`、`make`、`kubectl`、`python3`（含 PyYAML）
+- Kubernetes 集群；部署机有 `git`、`make`、`kubectl`、`python3`（含 PyYAML）；多集群中心另需 `openssl`（校验 xnet 证书）
 - 已部署可观测性组件（单集群：Prometheus / Elasticsearch / Tempo；多集群：中心的 VictoriaMetrics / VictoriaLogs）
 - 镜像已发布在 `xnet.registry.io:8443`，无需构建；模型配置 `deploy/secrets/core.yaml` 已填好默认值
 

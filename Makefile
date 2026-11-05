@@ -356,7 +356,7 @@ test-multicluster:
 # 中心部署 AIOps（测试环境）：make deploy-mc MC_LOAD_HOSTS=10.2.5.85
 # A2A 对外地址用中心自己的节点（跳过 xnet 虚拟 Node），不沿用单集群 make deploy 写进清单的地址；
 # 有域名时用 MC_A2A_PUBLIC_URL=https://… 指定。
-# 运行时只依赖集群配置、复制的 xnet 证书和 runner 密钥；不含任何边缘 kubeconfig。
+# 运行时只依赖集群配置、AIOps 专用 xnet 证书（mc-cert 申请）和 runner 密钥；不含任何边缘 kubeconfig。
 deploy-mc: mc-init
 	@if test -n "$(MC_LOAD_HOSTS)"; then \
 		for image in $(DOCKER_NAME):$(DOCKER_TAG) $(A2A_DOCKER_NAME):$(DOCKER_TAG) \
