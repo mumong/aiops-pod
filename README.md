@@ -61,7 +61,7 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make mc-discover WRITE=1     # 已接入的集群写入 deploy-edge/clusters.mc.yaml（### 之间）
-make mc-init                 # 专用 xnet 证书（经 xnet 接口申请）、密钥、集群配置；最后打印边缘要执行的命令
+make mc-init                 # 经 xnet 签发接口申请 AIOps 专用证书（不复用 xnet 自身证书）、生成密钥和集群配置；最后打印边缘要执行的命令
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc
@@ -79,11 +79,6 @@ make edge-deploy EDGE=local RUNNER_KEY=<mc-init 打印的值>   # RUNNER_LEVEL=1
 make case-deploy CASE=c08    # OOMKilled，全部 Case：make case-list
 ```
 在前端问"aiops-case-08 的 Pod 为什么一直重启？"，然后在报告下点"生成自动修复方案"。用完执行 `make case-clean CASE=c08` 清理。
-
-### 升级
-```bash
-echo <新版本号> > VERSION && make build push deploy   # 多集群中心把 deploy 换成 deploy-mc
-```
 
 ### 卸载与清理
 ```bash

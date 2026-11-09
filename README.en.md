@@ -61,7 +61,7 @@ Prerequisite: the edges have joined the center through xnet (`kubectl get nodes`
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make mc-discover WRITE=1     # writes the joined clusters into deploy-edge/clusters.mc.yaml (between ###)
-make mc-init                 # certificate, key, cluster config; prints the edge command at the end
+make mc-init                 # AIOps's own certificate from xnet's issuing API (not xnet's own), key, cluster config; prints the edge command at the end
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc
@@ -79,11 +79,6 @@ Open `http://<center IP>:30082` and ask "which clusters do I have?".
 make case-deploy CASE=c08    # OOMKilled; all cases: make case-list
 ```
 Ask in the frontend "why does the Pod in aiops-case-08 keep restarting?", then click "生成自动修复方案" (generate repair plan) under the report. Clean up with `make case-clean CASE=c08`.
-
-### Upgrade
-```bash
-echo <new version> > VERSION && make build push deploy   # on a multi-cluster center use deploy-mc instead of deploy
-```
 
 ### Uninstall and clean up
 ```bash

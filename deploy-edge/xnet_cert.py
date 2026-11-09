@@ -217,7 +217,7 @@ def ensure(args):
     if problems:
         return _fail(problems)
     print(
-        f"已通过 xnet-management 接口为 AIOps 新签发专用客户端证书（新密钥对，非复制 xnet 自身证书）→ {out}：{_describe(summary)}"
+        f"已签发 AIOps 专用 xnet 客户端证书（经 xnet-management 签发接口生成新密钥对，不复用 xnet 自身证书）→ {out}：{_describe(summary)}"
     )
     return 0
 

@@ -70,7 +70,7 @@ tests/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/
 
 ## 3. 发布与验证
 
-部署、升级、多集群和边缘 runner 的命令统一见 [README 快速开始](../README.md#快速开始)，这里只补充细节：
+部署、多集群和边缘 runner 的命令统一见 [README 快速开始](../README.md#快速开始)，这里只补充细节：
 
 - 发布前确认没有进行中的诊断或修复（发布会中断它们）；按 MCP → Agent → 前端的顺序，只发布改过的仓库。
 
