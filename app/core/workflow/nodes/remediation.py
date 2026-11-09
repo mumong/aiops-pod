@@ -75,6 +75,9 @@ class RepairDraft(QueryAnswer):
     # Cluster facts bound per planning call (``with_controller_chains``): the Pod's
     # ownerReferences chain, keyed "namespace/pod". Empty = unknown, nothing enforced.
     controller_chains: ClassVar[Dict[str, ControllerChain]] = {}
+    # Read-only kubectl on the same cluster (string command), for objects the chain
+    # could not reach; None = nothing beyond the chain is looked up.
+    owner_lookup: ClassVar[Optional[Callable[[str], str]]] = None
     # Planning call only (``with_preflight``): dry-runs the write commands on the plan's
     # cluster; a failure goes back to the model as a validation error to fix.
     preflight: ClassVar[Optional[Callable[[list], List[str]]]] = None
@@ -83,13 +86,14 @@ class RepairDraft(QueryAnswer):
     request_scope: ClassVar[Dict] = {}
 
     @classmethod
-    def with_controller_chains(cls, chains: Dict[str, ControllerChain]):
+    def with_controller_chains(cls, chains: Dict[str, ControllerChain], lookup=None):
         """A schema bound to this call's ownership facts; the tool name stays RepairDraft."""
         if not chains:
             return cls
-        return type(
-            cls.__name__, (cls,), {"controller_chains": dict(chains), "__module__": cls.__module__}
-        )
+        attrs = {"controller_chains": dict(chains), "__module__": cls.__module__}
+        if lookup is not None:
+            attrs["owner_lookup"] = staticmethod(lookup)
+        return type(cls.__name__, (cls,), attrs)
 
     @classmethod
     def with_preflight(cls, check):
@@ -212,7 +216,9 @@ class RepairDraft(QueryAnswer):
                 # chain (ReplicaSet under a Deployment, Job under a CronJob) is rewritten
                 # by its controller, so a patch there is accepted and changes nothing.
                 managed = managed_write_error(
-                    command, type(self).chain_for(target.namespace, target.pod)
+                    command,
+                    type(self).chain_for(target.namespace, target.pod),
+                    type(self).owner_lookup,
                 )
                 if managed:
                     raise ValueError(f"{stage}_command：{managed}")
@@ -292,6 +298,19 @@ def _mentions_kubectl_command(text):
     return False
 
 
+def _command_runner(run_argv):
+    """A string-command runner over an argv runner (ownership lookups take strings)."""
+    import shlex
+
+    return lambda command: run_argv(shlex.split(command))
+
+
+def _cluster_command_runner(contract):
+    from app.core.remediation.preflight import runner_for
+
+    return _command_runner(runner_for(contract))
+
+
 def _request_targets(contract):
     """Pods named in the request, when their namespace is unambiguous."""
     contract = contract or {}
@@ -307,11 +326,15 @@ class RemediationNode(QueryCollectNode):
     def node_id(self):
         return "remediation"
 
-    def _controller_chains(self, diagnosis, request_contract=None) -> Dict[str, ControllerChain]:
+    def _controller_chains(
+        self, diagnosis, request_contract=None, runner=None
+    ) -> Dict[str, ControllerChain]:
         """Read-only ownerReferences lookups for the Pods being repaired; failures leave it empty.
 
         Targets come from the diagnosis group when there is one, otherwise from the
         request itself, so the node also works without an upstream diagnosis.
+        ``runner`` runs on the plan's cluster (an edge goes through its runner); live
+        run 9a22d797 looked edge Pods up on the center and found no chain at all.
         """
         targets = [
             g.get("target") for g in (diagnosis or {}).get("groups", []) if isinstance(g, dict)
@@ -319,9 +342,9 @@ class RemediationNode(QueryCollectNode):
         if not targets:
             return {}
         try:
-            from app.core.remediation.executor import run_local_command
-
-            return chains_for_targets(targets, run_local_command)
+            if runner is None:
+                runner = _cluster_command_runner(request_contract)
+            return chains_for_targets(targets, runner)
         except Exception as exc:  # planning continues without ownership facts
             logging.getLogger(__name__).warning("[remediation] 控制器链解析失败: %s", exc)
             return {}
@@ -396,13 +419,14 @@ class RemediationNode(QueryCollectNode):
         diagnosis = ((state.get("repair_context") or {}).get("diagnosis") or {}).get(
             "payload"
         ) or {}
-        chains = self._controller_chains(diagnosis, state.get("request_contract"))
         from app.core.remediation.preflight import is_remote, preflight_errors, runner_for
 
         run = runner_for(state.get("request_contract"))
         remote = is_remote(state.get("request_contract"))
+        lookup = _command_runner(run)
+        chains = self._controller_chains(diagnosis, state.get("request_contract"), lookup)
         schema = (
-            RepairDraft.with_controller_chains(chains)
+            RepairDraft.with_controller_chains(chains, lookup)
             .with_preflight(lambda actions: preflight_errors(actions, run, remote=remote))
             .with_request_scope(state.get("request_contract"))
         )

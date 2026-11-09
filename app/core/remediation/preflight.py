@@ -11,11 +11,25 @@ it reports kubectl's own error, it does not judge what the command should be.
 
 from __future__ import annotations
 
+import re
 import shlex
 from typing import Callable, List, Optional
 
 Runner = Callable[[List[str]], str]
 _UNSUPPORTED = "unknown flag: --dry-run"
+# kubectl's own verdict that the server-side object would not change: "patched (no
+# change)" (patch, set, label, annotate) and "unchanged" (apply), optionally followed
+# by "(server dry run)". Live run 9a22d797: a merge patch deleting an annotation
+# the object did not have printed "replicaset.apps/x patched (no change)".
+_OBJECT_LINE = re.compile(r"^\S+/\S+ ")
+_NO_CHANGE = re.compile(r"(?:\(no change\)| unchanged)(?: \(server dry run\))?\s*$")
+
+
+def reports_no_change(output) -> bool:
+    """True when every object line kubectl printed says the object was left unchanged."""
+    lines = [line.strip() for line in str(output or "").splitlines() if line.strip()]
+    objects = [line for line in lines if _OBJECT_LINE.match(line)]
+    return bool(objects) and all(_NO_CHANGE.search(line) for line in objects)
 
 
 def dry_run_argv(command: str) -> Optional[List[str]]:
@@ -68,12 +82,19 @@ def preflight_errors(actions, run: Runner, remote: bool = False) -> List[str]:
         if argv is None:
             continue
         try:
-            run(argv)
+            output = run(argv)
         except Exception as exc:  # noqa: BLE001 - the error text is the finding
             text = str(exc).strip()
             if _UNSUPPORTED in text:
                 continue  # this subcommand has no dry run; nothing to learn
             errors.append(f"{getattr(action, 'id', '?')}: `{command}` → {text[:400]}")
+            continue
+        if reports_no_change(output):
+            errors.append(
+                f"{getattr(action, 'id', '?')}: `{command}` → 服务端预检显示该命令不会改变任何对象"
+                f"（kubectl：{str(output).strip()[:200]}）。要改的字段不存在、已是目标值，或写在了不生效的位置"
+                "（例如对象自身的 metadata 与 spec.template 的区别）；请读取对象核对字段路径后修正"
+            )
     return errors
 
 

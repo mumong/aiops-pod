@@ -269,7 +269,7 @@ MCP 工具服务（mcpstander）和前端在独立仓库。
 **输入**（`scoped_diagnosis` 只截取本组）：
 - 本组历史报告、关键事实、未确认项与引用，并附说明"不是执行授权，生成方案前可自主核实"；
 - 收窄后的 `request_contract`；
-- **控制器链**（有诊断时取诊断目标，否则取请求中的 Pod）：代码用只读 `kubectl get -o json` 沿 `ownerReferences` 走到顶层（如 Pod → ReplicaSet → Deployment，最多 6 层）。
+- **控制器链**（有诊断时取诊断目标，否则取请求中的 Pod）：代码用只读 `kubectl get -o json` 沿 `ownerReferences` 走到顶层（如 Pod → ReplicaSet → Deployment，最多 6 层）。查询在本组集群上执行（边缘经 runner，与预检同一路由）。
 
 **Agent**：只读工具（写工具屏蔽），最多 `max_steps.remediation=64` 步，自行读取要修改对象的当前配置（必要时分页）。节点不依赖上游诊断：没有诊断时，修复对象和控制器链取自请求中的 namespace/Pod。
 
@@ -288,12 +288,13 @@ answer:        给人看的方案说明
 |---|---|
 | target 的 namespace/Pod 必须在用户请求范围内（与执行器同一条规则 `request_scope_error`）；反馈写明越界的值、请求允许的对象和下一步 | Pod 名留空或写错，到执行时才被拦（run fe4fff51ed7846db） |
 | 命令只能作用于本组 Pod 或其已核实的控制器 | 改到其他对象 |
-| 写在被管理的中间层（ReplicaSet、Job）上 → 拒绝，并指出应改的顶层控制器 | 修改被上层覆盖、看似成功实际无效 |
+| 写在被管理的中间层（ReplicaSet、Job）上 → 拒绝，并指出应改的顶层控制器；控制器链不完整时，改读被写对象自身的 `ownerReferences` 判断 | 修改被上层覆盖、看似成功实际无效（run 9a22d797：边缘 Pod 的链曾在中心查询，结果为空） |
 | 命令中的控制器名与核实结果不一致 → 拒绝 | 把 ReplicaSet 名当作 Deployment 名使用 |
 | 每个 target 要么有动作，要么在 assessments 中说明原因 | 命令写在正文、动作为空 |
 | ready 必须有动作，其他状态不能带动作 | 状态与动作不一致 |
 | 正文出现 kubectl 写命令而 actions 为空 → 拒绝 | 只有说明、没有可执行方案 |
 | 通过以上规则后才做 `kubectl --dry-run=server` 预检（在本组集群上） | 被规则拒绝的命令（如用 `&&` 连写两条）拿到规则自己的说明，且不会发到集群 |
+| 预检输出为 kubectl 的 `(no change)` / `unchanged` → 拒绝 | 字段路径不对或写错位置，命令“成功”却什么都没改 |
 
 规划结果以不可变记录（带版本号）保存；前端修复工作区展示修复对象、异常原因、命令、风险与回滚建议。规划过程（每次工具调用的参数、状态、结果摘要，以及模型思考）由 [progress.py](../app/core/remediation/progress.py) 有界记录在任务上（`planning_progress`），工作区按"规划 → 审批 → 执行 → 恢复观察 → 结果"展示当前阶段并实时显示规划过程。
 
@@ -319,6 +320,7 @@ answer:        给人看的方案说明
    - auto：不等审批，记 `approval=auto`。
    - 依次执行 dry_run → execute → verify：按参数列表执行，不经过 shell，单条命令有超时。
    - verify 失败不立即判失败，交给恢复观察作最终判断（模型写的验证命令只是启发式）。
+   - 所有 execute 输出都是 kubectl 的 `(no change)` / `unchanged` 时，直接以 `failed`（`error_code=no_change`）结束，不进入恢复观察。
    - 取消或方案被替代 → cancelled / superseded；已执行的动作不会自动回滚。
 
 ### 5.4 ⑨ 恢复观察（RecoveryWatch）

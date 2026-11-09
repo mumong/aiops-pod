@@ -146,8 +146,27 @@ def resolve_controller_chain(
     return ControllerChain(namespace=namespace, links=links, complete=complete)
 
 
-def managed_write_error(command: str, chain: Optional[ControllerChain]) -> str:
-    """Non-empty when ``command`` writes to a chain member that another controller rewrites."""
+def _own_controller(runner: Runner, namespace: str, kind: str, name: str) -> Optional[OwnerLink]:
+    """The controller named in the object's own ownerReferences; None when absent or unreadable."""
+    try:
+        obj = _get_json(runner, f"kubectl get {kind}/{name} -n {namespace} -o json")
+    except Exception:
+        return None  # a missing object is the dry run's finding, not ours
+    ref = _controller_ref(obj) if obj else None
+    return (
+        OwnerLink(str(ref["kind"]), str(ref["name"]), str(ref.get("uid") or "")) if ref else None
+    )
+
+
+def managed_write_error(
+    command: str, chain: Optional[ControllerChain], lookup: Optional[Runner] = None
+) -> str:
+    """Non-empty when ``command`` writes to an object that another controller rewrites.
+
+    The chain answers first. When it is incomplete (a lookup failed before the top,
+    live run 9a22d797: the edge Pod was looked up on the center), ``lookup`` reads
+    the written object's own ownerReferences on the plan's cluster instead.
+    """
     if chain is None or not chain.links:
         return ""
     verdict = check_command(command)
@@ -162,6 +181,15 @@ def managed_write_error(command: str, chain: Optional[ControllerChain]) -> str:
             return (
                 f"{kind}/{name} 由 {owner.label()} 管理，对它的修改会被控制器覆盖、不会生效；"
                 f"请把变更施加到最上层控制器 {root}"
+            )
+        if chain.complete or lookup is None or not chain.namespace:
+            continue
+        owner = _own_controller(lookup, chain.namespace, kind, name)
+        if owner is not None:
+            return (
+                f"{kind}/{name} 由 {owner.label()} 管理（读取其 ownerReferences 得知），"
+                "对它的修改会被控制器覆盖、不会生效；请把变更施加到最上层控制器"
+                f"（先读取 {owner.label()} 的 ownerReferences，直到没有控制器的那一层）"
             )
     return ""
 

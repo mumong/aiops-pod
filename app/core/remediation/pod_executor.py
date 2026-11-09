@@ -19,6 +19,7 @@ from app.core.remediation.policy import (
     request_scope_error,
     validate_target_command,
 )
+from app.core.remediation.preflight import reports_no_change
 from app.core.remediation.recovery import RecoveryConfig, RecoveryWatch
 from app.core.workflow.group_runner import group_display_name
 
@@ -275,6 +276,9 @@ class PodRepairExecutor:
                     except Exception as exc:
                         before[target["group_id"]] = {"exists": None, "error": str(exc)[:200]}
             total_actions, done_actions = len(prepared), 0
+            # Execute stages whose output says kubectl changed nothing (see
+            # preflight.reports_no_change); if every write was a no-op, nothing can recover.
+            unchanged, changed_any = [], False
             approved_any = False
             verify_failures = []
             for action, target, original, stages in prepared:
@@ -543,6 +547,11 @@ class PodRepairExecutor:
                             "修复命令或验证失败；已尝试的写操作可能生效，请复查状态，未自动回滚",
                         )
                         return
+                    if stage == "execute":
+                        if reports_no_change(output):
+                            unchanged.append(command)
+                        else:
+                            changed_any = True
                     audit_event(
                         "command_executed",
                         run_id=run_id,
@@ -588,6 +597,15 @@ class PodRepairExecutor:
                 if mode == "auto"
                 else "已执行批准的命令"
             )
+            if unchanged and not changed_any:
+                yield finish(
+                    "failed",
+                    "kubectl 报告修复命令没有改变任何对象（no change）："
+                    + "；".join(unchanged)[:600]
+                    + "。目标对象未被修改，修复未生效，因此不进入恢复观察；请核对字段路径和写入对象后重新规划",
+                    "no_change",
+                )
+                return
             if watch is None:
                 yield finish(
                     "needs_followup",
