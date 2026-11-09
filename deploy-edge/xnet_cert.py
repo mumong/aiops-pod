@@ -216,7 +216,9 @@ def ensure(args):
     summary, problems = inspect(out, args.min_days)
     if problems:
         return _fail(problems)
-    print(f"已向 xnet-management 签发 AIOps 专用客户端证书 → {out}：{_describe(summary)}")
+    print(
+        f"已通过 xnet-management 接口为 AIOps 新签发专用客户端证书（新密钥对，非复制 xnet 自身证书）→ {out}：{_describe(summary)}"
+    )
     return 0
 
 
