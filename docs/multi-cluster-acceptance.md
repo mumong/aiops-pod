@@ -479,3 +479,22 @@ Boss 反馈 run `e43e8298`（"我的所有边缘测集群有什么pod异常？"�
 
 脚本随环境变化更新：P0-9 不再假设 edge-89 没有 runner，用 `mc_common.runner_down` 临时缩容我们的 runner 再恢复；A8 按 MCP 8.0.6 起的 `data` 字段断言；P1-1 按当前各边缘实际的 case 命名空间推出期望。运行前在 edge-88 重新部署 c06、c08（`make case-clean` 后 `make case-deploy`）。
 
+
+### efk 可观测档案与从零部署（2026-11-10，MCP 8.1.0、AIOps 13.0.38、runner 1.1.0、observability chart 1.0.3）
+
+在 85/88/89 上卸载 AIOps 和可观测组件、清空节点上的残留数据，然后在各节点上按 README 执行（代码按 README `git clone`；85 的 NFS 有锁回收故障，中心的 helm 追加本环境覆盖文件 `values-85-env.yaml`，其余命令与 README 相同）。
+
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 可观测部署 | README 多集群第 1 步；`bash multicluster/status.sh` | 中心 75 秒、每个边缘 15 秒；三个集群指标、日志、DeepFlow 均到达 |
+| 工具与隔离 | `tools_direct.py --phase efk` | 31/31。每个集群：PromQL 只返回本集群序列、点名其他集群为空、聚合结果只有本集群、label 接口只有本集群；ES 容器日志、DeepFlow 链路、Pod 指标有数据；直接查后端时 ES 命中与 DeepFlow 流量只属于本集群；对照：不限定集群时三个后端都含三个集群的数据 |
+| MCP → AIOps 契约 | `contract_mcp_aiops.py` | 18/18 |
+| 端到端 | `e2e_ask.py --phase efk` | 7/7：列出集群；edge-89 的 c08 深度诊断只访问 edge-89（edge-88 runner 0 次），定位 OOMKilled 并引用容器日志中的内存分配记录；30 分钟内存峰值经中心 Prometheus 查询，与直接查询一致（66469888 字节）；中心和 edge-88 都有 `aiops-case-09` 时只访问 edge-88 |
+| 运行时不依赖运维 kubeconfig | `runtime_dependency_check.py` | 2/2 |
+| victoria 档案回归 | 按 cloud-observability README 装回 VictoriaMetrics K8s Stack，`make mc-discover WRITE=1 OBS=victoria`；`tools_direct.py --phase p1`、`contract_mcp_aiops.py`、edge-88 c08 深度诊断 | 12/12、18/18；诊断只访问 edge-88，定位 OOMKilled |
+| 再次从零部署 efk | 卸载 Victoria、清空数据后重复 README | 工具 31/31，端到端 7/7 |
+
+过程中发现并修正：
+- 验收脚本在 MCP Pod 的 shell 里调用工具，没有带上各 MCP 服务自己的环境变量（`AIOPS_ES_*`），ES / ClickHouse 走了默认命名空间；现在先读取挂载的 `mcp_config.yaml`。
+- `status.sh` 原来只看 DeepFlow 采集器是否在线；全新安装时采集器要等中心初始化 MySQL、拿到中心地址并按采集器组配置重启一次（内存上限 768Mi→1Gi）才发数据，期间"在线"但没有数据。现在按每个采集器近 5 分钟的 L4 流判断。
+- `make edge-delete` 的 `kubectl delete configmap A secret B` 把 `secret` 当成 ConfigMap 名，签名密钥 Secret 从未删除；改为 `configmap/A secret/B`。

@@ -279,6 +279,82 @@ def phase_p2() -> None:
     )
 
 
+def phase_efk() -> None:
+    """efk profile end to end: AIOps on the center Prometheus / ES / DeepFlow of every cluster.
+
+    Needs c08 (OOM) on edge-89 (make case-deploy CASE=c08 on that node) and
+    aiops-case-09 on both the center and edge-88 (same namespace, same workload).
+    """
+    r = Session().ask("我有哪些集群？")
+    record(r)
+    mc.check(
+        "EFK-E1-clusters-listed",
+        all(
+            name in r["answer"] or alias in r["answer"]
+            for name, alias in ((EDGE88, "edge-88"), (EDGE89, "edge-89"))
+        ),
+        r["answer"][:160].replace("\n", " "),
+    )
+
+    r = Session().ask("深度诊断 edge-89 上 aiops-case-08 命名空间的 Pod")
+    record(r)
+    scoped_check(
+        "EFK-E2-deep-diagnosis-scoped",
+        r,
+        r["route"] == "full_diagnosis"
+        and clusters_of(r) == {EDGE89}
+        and r["runner_hits"]["edge-88"] == 0,
+        f"run={r['run_id']} clusters={clusters_of(r)} hits={r['runner_hits']} {r['seconds']}s",
+    )
+    text = r["answer"]
+    mc.check("EFK-E2-oom-identified", "OOM" in text.upper(), text[:160].replace("\n", " "))
+    # Container log lines (not Kubernetes events) reached the report: the case logs its allocations.
+    mc.check(
+        "EFK-E2-log-evidence",
+        "allocat" in text,
+        "report cites the container's allocation log lines",
+    )
+
+    # History only the metrics backend has (kubectl top is disabled): the center Prometheus, pinned to edge-89.
+    r = Session().ask(
+        "edge-89 上 aiops-case-08 命名空间 workload Pod 过去 30 分钟的内存使用峰值是多少"
+    )
+    record(r)
+    metric_calls = [
+        c
+        for c in r["tool_calls"]
+        if c["tool"]
+        in (
+            "execute_pod_promql",
+            "execute_prometheus_instant_query",
+            "execute_prometheus_range_query",
+        )
+    ]
+    scoped_check(
+        "EFK-E4-metrics-from-center-prometheus",
+        r,
+        metric_calls
+        and {c["cluster"] for c in metric_calls} == {EDGE89}
+        and r["runner_hits"]["edge-88"] == 0,
+        f"run={r['run_id']} calls={[(c['tool'], c['cluster']) for c in metric_calls]}",
+    )
+    mc.check(
+        "EFK-E4-answer-has-a-value",
+        any(unit in r["answer"] for unit in ("MiB", "Mi", "MB", "bytes", "字节")),
+        r["answer"][:200].replace("\n", " "),
+    )
+
+    # Same namespace and workload on the center and edge-88: only edge-88 may be queried.
+    r = Session().ask("edge-88 上 aiops-case-09 命名空间的 Pod 有什么问题")
+    record(r)
+    scoped_check(
+        "EFK-E3-same-namespace-other-cluster-not-used",
+        r,
+        clusters_of(r) == {EDGE88} and r["runner_hits"]["edge-89"] == 0,
+        f"run={r['run_id']} route={r['route']} clusters={clusters_of(r)} hits={r['runner_hits']}",
+    )
+
+
 def phase_a5() -> None:
     """A5 + P2-2 on the existing single-cluster env: behaviour unchanged."""
     LEGACY["base"] = "http://10.2.0.48:30800"
@@ -642,10 +718,7 @@ def live_faults() -> dict:
     import importlib.util
     import os
 
-    script = (
-        Path(__file__).resolve().parents[3]
-        / "tests/cases/scripts/verify_observability.py"
-    )
+    script = Path(__file__).resolve().parents[3] / "tests/cases/scripts/verify_observability.py"
     spec = importlib.util.spec_from_file_location("lab_verifier", script)
     verifier = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = verifier  # its dataclasses resolve the module by name
@@ -902,6 +975,7 @@ def phase_intent() -> None:
 def main() -> None:
     phases = {
         "p2": phase_p2,
+        "efk": phase_efk,
         "a5": phase_a5,
         "quality": phase_quality,
         "p3": phase_p3,

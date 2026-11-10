@@ -48,8 +48,18 @@ def pod_sh(script: str, timeout: int = 60) -> tuple[int, str, str]:
     return out.returncode, out.stdout, out.stderr
 
 
+# Each MCP server process gets its own env from the mounted mcp_config.yaml (e.g. the
+# AIOPS_ES_* namespaces of aiops-observability-query); apply it before running a case.
+SERVER_ENV = r"""
+import os, yaml
+for _srv in (yaml.safe_load(open(os.environ.get("MCP_CONFIG_PATH", "/app/config/mcp_config.yaml"))) or {}).get("basicmcp") or []:
+    if _srv.get("name") == "aiops-observability-query":
+        os.environ.update({k: str(v) for k, v in (_srv.get("env") or {}).items()})
+"""
+
+
 def pod_py(code: str, timeout: int = 60) -> dict:
-    script = "cd /app/servers && python3 - <<'PYEOF'\n" + code + "\nPYEOF"
+    script = "cd /app/servers && python3 - <<'PYEOF'\n" + SERVER_ENV + code + "\nPYEOF"
     rc, out, err = pod_sh(script, timeout)
     try:
         return json.loads(out.strip().splitlines()[-1])
@@ -564,11 +574,224 @@ def phase_p3() -> None:
     mc.check("P3-1-runner-recovers", rc == 0 and "traffic-driver" in out, err.strip()[:120])
 
 
+# efk profile: center Prometheus / Elasticsearch / DeepFlow hold every cluster's data.
+# Each check asks one cluster and verifies, from the data itself, that nothing of
+# another cluster comes back. Clusters and target Pods are read from the running
+# config and the clusters themselves, not hard-coded.
+EFK_RAW = r"""
+import json
+import cluster_scope
+from aiops_observability.query import logs as L, tracing as T
+from aiops_observability.collectors import deepflow as D
+cfg = cluster_scope.config()
+out = {}
+for name in cfg.clusters:
+    with cluster_scope.activate({"cluster": name}) as scope:
+        c = scope.cluster.name
+        # ES: every hit of a namespace-wide search belongs to the active cluster.
+        body = {"size": 200, "_source": ["cluster"], "query": {"range": {"@timestamp": {"gte": "now-30m"}}}}
+        hits = L._hits(L._query_elasticsearch(body))
+        es = sorted({(h.get("_source") or {}).get("cluster") for h in hits})
+        # DeepFlow: flows whose Pod side is in this cluster carry only this cluster's name.
+        sql = ("SELECT dictGetOrDefault('flow_tag.pod_cluster_map','name',toUInt64(pod_cluster_id_1),'') AS c, count() AS n "
+               "FROM flow_log.l7_flow_log WHERE time > now() - INTERVAL 30 MINUTE AND "
+               + "1 = 1" + D.cluster_condition(1) + " GROUP BY c FORMAT JSON")
+        df = T._query_deepflow(sql)
+        out[c] = {"es_hits": len(hits), "es_clusters": es,
+                  "df": {r["c"]: int(r["n"]) for r in df.get("data", [])}, "df_error": df.get("error")}
+# Control: the same queries with no active cluster see several clusters, so the
+# per-cluster results above are the filter's doing, not a single-cluster backend.
+body = {"size": 0, "query": {"range": {"@timestamp": {"gte": "now-30m"}}},
+        "aggs": {"c": {"terms": {"field": "cluster", "size": 100}}}}
+es = L._query_elasticsearch(body)
+df = T._query_deepflow("SELECT dictGetOrDefault('flow_tag.pod_cluster_map','name',toUInt64(pod_cluster_id_1),'') AS c, "
+                       "count() AS n FROM flow_log.l7_flow_log WHERE time > now() - INTERVAL 30 MINUTE AND c != '' "
+                       "GROUP BY c FORMAT JSON")
+out["_unscoped"] = {"es": sorted(b["key"] for b in es.get("aggregations", {}).get("c", {}).get("buckets", [])),
+                    "df": sorted(r["c"] for r in df.get("data", []))}
+print(json.dumps(out))
+"""
+
+
+def _cluster_pods() -> dict:
+    """{cluster name: (kubeconfig name, namespace, pod)} from list_clusters and each cluster's Pods."""
+    listed = run_tools([("L", "clusters", "", {})])["L"]
+    pods = {}
+    for entry in listed["clusters"]:
+        # ops kubeconfigs are named after a cluster alias (center, edge-88, ...)
+        alias = next(
+            (a for a in ["center", *entry["aliases"]] if (mc.KUBE_DIR / a).is_file()), None
+        )
+        if entry["role"] != "center" and alias == "center":
+            alias = next((a for a in entry["aliases"] if (mc.KUBE_DIR / a).is_file()), None)
+        if alias is None:
+            continue
+        items = mc.kubectl_json(alias, "get", "pods", "-A")["items"]
+        running = [p for p in items if p["status"].get("phase") == "Running"]
+
+        def rank(p, _ns=("aiops-case-", "aiops")):
+            ns = p["metadata"]["namespace"]
+            return (
+                0 if ns.startswith(_ns[0]) else 1 if ns == _ns[1] else 2,
+                ns,
+                p["metadata"]["name"],
+            )
+
+        for p in sorted(running, key=rank)[:20]:
+            ns, pod = p["metadata"]["namespace"], p["metadata"]["name"]
+            try:
+                lines = mc.kubectl(
+                    alias, "logs", "-n", ns, pod, "--all-containers", "--since=30m", timeout=30
+                )
+            except RuntimeError:
+                continue
+            if lines.strip():
+                pods[entry["name"]] = (alias, ns, pod)
+                break
+    return {"listed": listed, "pods": pods}
+
+
+def phase_efk() -> None:
+    found = _cluster_pods()
+    listed, pods = found["listed"], found["pods"]
+    clusters = [c["name"] for c in listed["clusters"]]
+    for c in listed["clusters"]:
+        mc.check(
+            f"EFK-0-{c['name']}-listed",
+            c["online"]
+            and c["data"] == {"metrics": True, "logs": "container_logs", "traces": True},
+            json.dumps(c["data"]),
+        )
+    cases = []
+    for name in clusters:
+        others = [o for o in clusters if o != name]
+        cases += [
+            (
+                f"up:{name}",
+                "prom",
+                "execute_prometheus_instant_query",
+                {"cluster": name, "query": "up"},
+            ),
+            (
+                f"cross:{name}",
+                "prom",
+                "execute_prometheus_instant_query",
+                {"cluster": name, "query": 'up{cluster="%s"}' % others[0]},
+            ),
+            (
+                f"agg:{name}",
+                "prom",
+                "execute_prometheus_instant_query",
+                {"cluster": name, "query": "count by (cluster) (kube_pod_info)"},
+            ),
+            (f"lv:{name}", "prom", "get_label_values", {"cluster": name, "label_name": "cluster"}),
+        ]
+        if name in pods:
+            _, ns, pod = pods[name]
+            base = {"cluster": name, "namespace": ns, "pod": pod, "window_minutes": 60}
+            cases += [
+                (
+                    f"logs:{name}",
+                    "obs",
+                    "query_pod_logs",
+                    {**base, "purpose": "recent container logs"},
+                ),
+                (
+                    f"trace:{name}",
+                    "obs",
+                    "query_pod_tracing",
+                    {**base, "purpose": "requests to this pod"},
+                ),
+                (
+                    f"promql:{name}",
+                    "obs",
+                    "execute_pod_promql",
+                    {
+                        **base,
+                        "purpose": "memory",
+                        "promql": 'container_memory_working_set_bytes{namespace="%s",pod="%s"}'
+                        % (ns, pod),
+                        "query_type": "instant",
+                    },
+                ),
+            ]
+    r = run_tools(cases)
+    for name in clusters:
+        up = json.loads(r[f"up:{name}"]).get("data", {}).get("result", [])
+        seen = {s["metric"].get("cluster") for s in up}
+        mc.check(
+            f"EFK-1-{name}-promql-only-own",
+            up and seen == {name},
+            f"series={len(up)} clusters={seen}",
+        )
+        cross = json.loads(r[f"cross:{name}"]).get("data", {}).get("result", [])
+        mc.check(f"EFK-2-{name}-cross-cluster-empty", cross == [], f"series={len(cross)}")
+        agg = json.loads(r[f"agg:{name}"]).get("data", {}).get("result", [])
+        mc.check(
+            f"EFK-3-{name}-aggregation-scoped",
+            [s["metric"].get("cluster") for s in agg] == [name],
+            str([(s["metric"], s["value"][1]) for s in agg]),
+        )
+        values = json.loads(r[f"lv:{name}"]).get("data")
+        mc.check(
+            f"EFK-4-{name}-label-values-scoped", values == [name], f"cluster label values={values}"
+        )
+        if name not in pods:
+            mc.check(f"EFK-5-{name}-has-case-pod", False, "no running aiops-case workload Pod")
+            continue
+        logs = r[f"logs:{name}"]
+        mc.check(
+            f"EFK-5-{name}-container-logs",
+            logs.get("ok")
+            and logs.get("cluster") == name
+            and logs.get("backend") == "elasticsearch"
+            and logs.get("coverage") in ("present", "partial")
+            and logs.get("samples"),
+            f"ok={logs.get('ok')} coverage={logs.get('coverage')} backend={logs.get('backend')} "
+            f"samples={len(logs.get('samples') or [])} error={(logs.get('error') or {}).get('code')}",
+        )
+        trace = r[f"trace:{name}"]
+        mc.check(
+            f"EFK-6-{name}-tracing-runs",
+            trace.get("ok")
+            and trace.get("cluster") == name
+            and trace.get("backend") == "deepflow",
+            f"ok={trace.get('ok')} coverage={trace.get('coverage')} flows={len(trace.get('samples') or [])} "
+            f"error={(trace.get('error') or {}).get('code')}",
+        )
+        pq = r[f"promql:{name}"]
+        mc.check(
+            f"EFK-7-{name}-pod-promql",
+            pq.get("ok") and pq.get("cluster") == name and pq.get("coverage") == "present",
+            f"ok={pq.get('ok')} coverage={pq.get('coverage')} error={(pq.get('error') or {}).get('code')}",
+        )
+    raw = pod_py(EFK_RAW, timeout=180)
+    control = raw.get("_unscoped") or {}
+    mc.check(
+        "EFK-C-unscoped-backends-hold-several-clusters",
+        set(control.get("es") or []) >= set(clusters) and len(control.get("df") or []) > 1,
+        json.dumps(control),
+    )
+    for name in clusters:
+        got = raw.get(name) or {}
+        mc.check(
+            f"EFK-8-{name}-es-hits-only-own",
+            got.get("es_hits", 0) > 0 and got.get("es_clusters") == [name],
+            f"hits={got.get('es_hits')} clusters={got.get('es_clusters')}",
+        )
+        df = got.get("df") or {}
+        mc.check(
+            f"EFK-9-{name}-deepflow-only-own",
+            not got.get("df_error") and set(df) == {name} and df[name] > 0,
+            f"by cluster={df} error={str(got.get('df_error'))[:120]}",
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--phase", choices=["p0", "p1", "p3"], required=True)
+    parser.add_argument("--phase", choices=["p0", "p1", "p3", "efk"], required=True)
     args = parser.parse_args()
-    {"p0": phase_p0, "p1": phase_p1, "p3": phase_p3}[args.phase]()
+    {"p0": phase_p0, "p1": phase_p1, "p3": phase_p3, "efk": phase_efk}[args.phase]()
     mc.finish()
 
 
