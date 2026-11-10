@@ -307,7 +307,7 @@ edge-delete: edge-target
 	$(EDGE_KUBECTL) delete -f deploy-edge/runner.yaml --ignore-not-found
 	$(EDGE_KUBECTL) delete clusterrolebinding $(RUNNER_BINDINGS) --ignore-not-found
 	$(EDGE_KUBECTL) delete clusterrole aiops-edge-runner-read-l1 aiops-edge-runner-read-l2 aiops-edge-runner-write-l2 aiops-edge-runner-read-l3 aiops-edge-runner-write aiops-edge-runner-read-cluster --ignore-not-found
-	$(EDGE_KUBECTL) -n aiops delete configmap aiops-edge-runner-policy secret aiops-edge-key --ignore-not-found
+	$(EDGE_KUBECTL) -n aiops delete configmap/aiops-edge-runner-policy secret/aiops-edge-key --ignore-not-found
 
 # AIOps 专用的 xnet 隧道客户端证书：本机 $(MC_XNET_CERT_DIR) 里的证书有效（剩余 30 天以上）就沿用，
 # 否则登录 xnet-management API 申请一张新的（POST /api/v1/registry/certificate，只签发证书，不在 xnet 中创建对象）。

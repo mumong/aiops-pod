@@ -57,10 +57,10 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 Open `http://<node IP>:30082`. API: `:30800`; A2A: `:30801` (see [A2A](docs/a2a.md)).
 
 ### Multi-cluster
-Prerequisite: the edges have joined the center through xnet (`kubectl get nodes` on the center shows `vc-…` virtual Nodes). **A cluster's name is its xnet virtual Node name**; the observability data and AIOps both use it:
+Prerequisite: the edges have joined the center through xnet (`kubectl get nodes` on the center shows `vc-…` virtual Nodes). **A cluster's name is its xnet virtual Node name**; the observability data and AIOps both use it. On the center, list each cluster's name, role and IP (read-only):
 
 ```bash
-kubectl get nodes -l node-role.kubernetes.io/xnet-agent   # on the center; the one labelled node-role.kubernetes.io/self is the center
+cd ~/aiops-workspace/holmegpt-agent && make mc-discover   # each line: name: vc-…  # center/edge, IP …
 ```
 
 #### 1. Deploy observability

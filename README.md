@@ -57,10 +57,10 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 打开 `http://<节点IP>:30082`。API：`:30800`；A2A：`:30801`（见 [A2A](docs/a2a.md)）。
 
 ### 多集群
-前提：边缘已经通过 xnet 接入中心（在中心执行 `kubectl get nodes`，能看到 `vc-…` 虚拟 Node）。每个集群的**集群名就是它的 xnet 虚拟 Node 名**，可观测数据和 AIOps 都用这个名字：
+前提：边缘已经通过 xnet 接入中心（在中心执行 `kubectl get nodes`，能看到 `vc-…` 虚拟 Node）。每个集群的**集群名就是它的 xnet 虚拟 Node 名**，可观测数据和 AIOps 都用这个名字。在中心查看每个集群的名字、角色和 IP（只读）：
 
 ```bash
-kubectl get nodes -l node-role.kubernetes.io/xnet-agent   # 在中心执行；带 node-role.kubernetes.io/self 标签的是中心
+cd ~/aiops-workspace/holmegpt-agent && make mc-discover   # 输出中每行 name: vc-…  # 中心/边缘，IP …
 ```
 
 #### 1. 部署可观测性
