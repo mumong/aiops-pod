@@ -275,9 +275,11 @@ edge-target:
 	@echo "边缘目标：$$($(EDGE_KUBECTL) config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo '?')（$(if $(EDGE_KUBECONFIG),$(EDGE_KUBECONFIG),当前上下文)）"
 
 # 列出 xnet 已接入的集群（虚拟 Node），输出替换集群配置中 ### 之间的部分；WRITE=1 直接写入 $(MC_CLUSTERS_FILE)
+# OBS：各集群使用的可观测档案，efk（默认，observability 仓库的中心 + 边缘部署）或 victoria
+OBS ?= efk
 mc-discover:
 	@$(CENTER_KUBECTL) get nodes -l node-role.kubernetes.io/xnet-agent -o json | \
-		$(PYTHON) deploy-edge/discover_clusters.py $(if $(WRITE),$(MC_CLUSTERS_FILE))
+		OBS=$(OBS) $(PYTHON) deploy-edge/discover_clusters.py $(if $(WRITE),$(MC_CLUSTERS_FILE))
 
 # 在边缘集群部署 runner：make edge-deploy EDGE=edge-88（用 $(MC_KUBE_DIR)/edge-88）或 EDGE=local（当前上下文）
 # 签名密钥来自本机 $(MC_KEY_FILE)；在边缘节点上执行时用 RUNNER_KEY=<值> 传入（make mc-init 会打印完整命令）

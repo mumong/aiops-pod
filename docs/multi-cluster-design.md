@@ -87,7 +87,11 @@ clusters:
       call_timeout_seconds: 15
 
 observability_profiles:
-  victoria:
+  efk:                             # observability 仓库的中心 + 边缘部署（make mc-discover 默认）
+    metrics: {type: prometheus, url: …observability-prometheus…, cluster_label: cluster}
+    logs:    {type: elasticsearch, cluster_field: cluster}
+    traces:  {type: deepflow, cluster_field: pod_cluster}
+  victoria:                        # make mc-discover OBS=victoria
     metrics: {type: victoriametrics, url: …vmselect…, cluster_label: cluster}
     logs:    {type: victorialogs_events, url: …vlsingle…, cluster_field: cluster}
     traces:  {type: none}
@@ -124,14 +128,16 @@ MCP 工具 `list_clusters`（`servers/cluster_scope.py`）只返回运维关心�
 
 一次工具调用带着 `cluster` 参数进入 MCP。MCP 入口用 `cluster_scope.activate()` 设置当前集群，再按该集群的后端档案决定去哪里取数据。
 
-| 工具 | legacy | victoria |
-|---|---|---|
-| `execute_pod_promql`、prometheus 的 6 个工具 | Prometheus | 中心 vmselect，附加 `extra_label=cluster=<名称>`。VM 会把这个条件强制加到所有选择器上，模型写错集群也查不到别的集群 |
-| `query_pod_logs` | Elasticsearch 容器日志 | 中心 vlsingle 里**该 Pod 相关的 K8s 事件**。查到事件时返回 `query_partial` + `coverage=partial`，没查到时返回 `query_succeeded` + `coverage=empty`；结果标注 `log_source=k8s_events`，并说明"未采集容器日志，请使用 kubectl_logs" |
-| `query_pod_tracing` | DeepFlow + Tempo | `capability_missing` |
-| `query_pod_topology`、Pod 生命周期 | K8s 实时对象 | 同左，经 kubectl 垫片 |
+| 工具 | legacy | efk | victoria |
+|---|---|---|---|
+| `execute_pod_promql`、prometheus 的 6 个工具 | Prometheus | 中心 Prometheus。MCP 把 `cluster="<名称>"` 注入 PromQL 的每个选择器（`servers/promql_scope.py`；by/on 等标签列表、函数、字符串、时间范围不动；无法注入的查询直接拒绝，不会不带过滤发出），series / label 接口没有 `match[]` 时补一个 | 中心 vmselect，附加 `extra_label=cluster=<名称>`。VM 会把这个条件强制加到所有选择器上，模型写错集群也查不到别的集群 |
+| `query_pod_logs` | Elasticsearch 容器日志 | 中心 ES 的容器日志，查询外层加 `cluster` 字段过滤 | 中心 vlsingle 里**该 Pod 相关的 K8s 事件**。查到事件时返回 `query_partial` + `coverage=partial`，没查到时返回 `query_succeeded` + `coverage=empty`；结果标注 `log_source=k8s_events`，并说明"未采集容器日志，请使用 kubectl_logs" |
+| `query_pod_tracing` | DeepFlow + Tempo | 中心 DeepFlow：Pod 所在一侧（`ip4_0`/`ip4_1`）同时要求 `pod_cluster_id_0/1` 属于该集群（`flow_tag.pod_cluster_map` 按名称查），因为各集群 Pod 网段可能相同 | `capability_missing` |
+| `query_pod_topology`、Pod 生命周期 | K8s 实时对象 | 同左，经 kubectl 垫片 | 同左，经 kubectl 垫片 |
 
 - 所有结果顶层增加 `cluster` 和 `backend` 字段，其余格式不变。
+- 档案里声明了 `cluster_label` / `cluster_field` 的后端存着多个集群的数据，过滤只由档案决定，没有按集群名或环境的特判；新增集群只需要可观测数据的 `cluster` 值等于集群名。
+- 有档案的集群，访问后端的 kubectl（读 ES / ClickHouse 的 Secret、exec 进它们的 Pod）始终在中心执行（`cluster_scope.backend_env`），即使目标是边缘集群；查业务 Pod 的 kubectl 仍去目标集群。legacy 集群的后端在它自己的集群里。
 - `query_pod_logs` 复用现有工具而不新增工具，因为 MCP 的工具列表是静态的；新增工具还要改 AIOps 的提示词和各节点的工具清单。
 - 结果必须符合 AIOps 的观测契约（`app/core/context/observation.py`）：`ok=true` 时 `query_succeeded` 不能配 `partial`。MCP 8.0.4 违反了这一条，导致每次日志查询都被判"契约无效"。现在由验收脚本 `contract_mcp_aiops.py` 把每个集群上各工具的真实输出交给 AIOps 解析器校验。
 

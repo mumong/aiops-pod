@@ -34,8 +34,8 @@ An AIOps assistant for Kubernetes: query clusters in natural language, diagnose 
 
 ## Quick start
 ### Requirements
-- A Kubernetes cluster; a deploy host with `git`, `make`, `kubectl` and `python3` (with PyYAML)
-- Observability installed (single cluster: Prometheus / Elasticsearch / Tempo; multi-cluster: VictoriaMetrics / VictoriaLogs on the center)
+- A Kubernetes cluster; a deploy host with `git`, `make`, `kubectl`, `helm` and `python3` (with PyYAML)
+- Observability installed ([observability](http://10.2.0.86/platform/observability): its single-cluster deployment; for multi-cluster its center + edge deployment, see below. Multi-cluster can also use the center / edge deployment of [VictoriaMetrics K8s Stack](http://10.2.0.86/platform/cloud-observability))
 - Images are published on `xnet.registry.io:8443`, so nothing to build; the model settings in `deploy/secrets/core.yaml` ship with defaults
 
 ### Clone
@@ -44,10 +44,12 @@ mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
 git clone ssh://git@10.2.0.86:9922/wanghuhu/mcpstander.git
 git clone ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 git clone ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+git clone -b feat/multicluster-center-edge http://10.2.0.86/platform/observability.git   # observability; drop -b once merged to main
 ```
 
 ### Single cluster
 ```bash
+cd ~/aiops-workspace/observability  && helm upgrade --install observability . -n monitor --create-namespace
 cd ~/aiops-workspace/mcpstander     && make deploy
 cd ~/aiops-workspace/holmegpt-agent && make deploy
 cd ~/aiops-workspace/aiops-frount   && make deploy
@@ -55,19 +57,41 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 Open `http://<node IP>:30082`. API: `:30800`; A2A: `:30801` (see [A2A](docs/a2a.md)).
 
 ### Multi-cluster
-Prerequisite: the edges have joined the center through xnet (`kubectl get nodes` on the center shows `vc-…` virtual Nodes).
+Prerequisite: the edges have joined the center through xnet (`kubectl get nodes` on the center shows `vc-…` virtual Nodes). **A cluster's name is its xnet virtual Node name**; the observability data and AIOps both use it:
 
-#### Install the center (run on a center node)
+```bash
+kubectl get nodes -l node-role.kubernetes.io/xnet-agent   # on the center; the one labelled node-role.kubernetes.io/self is the center
+```
+
+#### 1. Deploy observability
+All data lives on the center; edges run collectors only (details: [observability multi-cluster](http://10.2.0.86/platform/observability/-/blob/feat/multicluster-center-edge/multicluster/README.md)):
+```bash
+# center node
+cd ~/aiops-workspace/observability
+helm upgrade --install observability . -n monitor --create-namespace \
+  -f multicluster/values-center.yaml --set global.cluster=<the center's vc-… name> --timeout 20m
+
+# each edge node
+cd ~/aiops-workspace/observability
+helm upgrade --install observability . -n monitor --create-namespace \
+  -f multicluster/values-edge.yaml --set global.cluster=<this edge's vc-… name> --set global.centerAddress=<center node IP>
+
+# center node: after about 3 minutes every cluster must be OK before you go on
+bash multicluster/status.sh
+```
+Add the environment's own overrides (storage class, node affinity, ...) with `-f my-env.yaml` as usual. With VictoriaMetrics K8s Stack instead, deploy it from its README and add `OBS=victoria` in the next step.
+
+#### 2. Install the AIOps center (run on a center node)
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
-make mc-discover WRITE=1     # writes the joined clusters into deploy-edge/clusters.mc.yaml (between ###)
+make mc-discover WRITE=1     # writes the joined clusters into deploy-edge/clusters.mc.yaml (between ###); observability profile efk by default, OBS=victoria for Victoria
 make mc-init                 # AIOps's own certificate from xnet's issuing API (not xnet's own), key, cluster config; prints the edge command at the end
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc
 ```
 
-#### Join an edge (run on each edge node, no kubeconfig needed)
+#### 3. Join an edge (run on each edge node, no kubeconfig needed)
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make edge-deploy EDGE=local RUNNER_KEY=<value printed by mc-init>   # RUNNER_LEVEL=1|2|3, default 2
@@ -144,7 +168,7 @@ Defaults work as-is; change only these when needed, then run `make deploy` in th
 | Temporary switch | `PUT /repair/policy/mode` (with `AIOPS_ADMIN_TOKEN`) | e.g. `{"mode":"auto","ttl_minutes":30}`; reverts to the configured value when it expires, no redeploy; see [HTTP API](docs/api.md#6-策略与审计) |
 | Dangerous-command rules | `denied_*` and `approval_required` under the same `workflow.remediation` | Denied commands never run; `approval_required` forces human approval even in auto. On multi-cluster, re-run `make edge-deploy` on each edge afterwards |
 | Model | `deploy/secrets/core.yaml` | Model address, name, key, context size |
-| Metrics / logs addresses | MCP repo `deploy/configmap.yaml` (`PROMETHEUS_URL`, `ES_URL`); multi-cluster: `### 核对 ###` in `deploy-edge/clusters.mc.yaml` | Change when the observability components move namespace or service name |
+| Metrics / logs addresses | MCP repo `deploy/configmap.yaml` (`PROMETHEUS_URL`, `ES_URL`); multi-cluster: `### 核对 ###` in `deploy-edge/clusters.mc.yaml` (the efk / victoria observability profiles) | Change when the observability components move namespace or service name |
 | Cluster list and aliases | Between the `### 替换开始 ###` markers of `deploy-edge/clusters.mc.yaml` | Multi-cluster only; generated by `make mc-discover WRITE=1` |
 | Edge permission level | `make edge-deploy … RUNNER_LEVEL=1\|2\|3` | 1 read-only; 2 (default) common repairs; 3 admin |
 

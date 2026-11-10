@@ -34,8 +34,8 @@
 
 ## 快速开始
 ### 环境要求
-- Kubernetes 集群；部署机有 `git`、`make`、`kubectl`、`python3`（含 PyYAML）；多集群中心另需 `openssl`（校验 xnet 证书）
-- 已部署可观测性组件（单集群：Prometheus / Elasticsearch / Tempo；多集群：中心的 VictoriaMetrics / VictoriaLogs）
+- Kubernetes 集群；部署机有 `git`、`make`、`kubectl`、`helm`、`python3`（含 PyYAML）；多集群中心另需 `openssl`（校验 xnet 证书）
+- 已部署可观测性组件（[observability](http://10.2.0.86/platform/observability)：单集群部署；多集群用它的中心 + 边缘部署，见下文。多集群也可以用 [VictoriaMetrics K8s Stack](http://10.2.0.86/platform/cloud-observability) 的中心 / 边缘部署）
 - 镜像已发布在 `xnet.registry.io:8443`，无需构建；模型配置 `deploy/secrets/core.yaml` 已填好默认值
 
 ### 下载代码
@@ -44,10 +44,12 @@ mkdir -p ~/aiops-workspace && cd ~/aiops-workspace
 git clone ssh://git@10.2.0.86:9922/wanghuhu/mcpstander.git
 git clone ssh://git@10.2.0.86:9922/wanghuhu/holmegpt-agent.git
 git clone ssh://git@10.2.0.86:9922/wanghuhu/aiops-frount.git
+git clone -b feat/multicluster-center-edge http://10.2.0.86/platform/observability.git   # 可观测性；合并到 main 后去掉 -b
 ```
 
 ### 单集群
 ```bash
+cd ~/aiops-workspace/observability  && helm upgrade --install observability . -n monitor --create-namespace
 cd ~/aiops-workspace/mcpstander     && make deploy
 cd ~/aiops-workspace/holmegpt-agent && make deploy
 cd ~/aiops-workspace/aiops-frount   && make deploy
@@ -55,19 +57,41 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 打开 `http://<节点IP>:30082`。API：`:30800`；A2A：`:30801`（见 [A2A](docs/a2a.md)）。
 
 ### 多集群
-前提：边缘已经通过 xnet 接入中心（在中心执行 `kubectl get nodes`，能看到 `vc-…` 虚拟 Node）。
+前提：边缘已经通过 xnet 接入中心（在中心执行 `kubectl get nodes`，能看到 `vc-…` 虚拟 Node）。每个集群的**集群名就是它的 xnet 虚拟 Node 名**，可观测数据和 AIOps 都用这个名字：
 
-#### 安装中心（在中心节点执行）
+```bash
+kubectl get nodes -l node-role.kubernetes.io/xnet-agent   # 在中心执行；带 node-role.kubernetes.io/self 标签的是中心
+```
+
+#### 1. 部署可观测性
+所有数据集中在中心，边缘只装采集器（详细说明见 [observability 多集群](http://10.2.0.86/platform/observability/-/blob/feat/multicluster-center-edge/multicluster/README.md)）：
+```bash
+# 中心节点
+cd ~/aiops-workspace/observability
+helm upgrade --install observability . -n monitor --create-namespace \
+  -f multicluster/values-center.yaml --set global.cluster=<中心的 vc-… 名> --timeout 20m
+
+# 每个边缘节点
+cd ~/aiops-workspace/observability
+helm upgrade --install observability . -n monitor --create-namespace \
+  -f multicluster/values-edge.yaml --set global.cluster=<该边缘的 vc-… 名> --set global.centerAddress=<中心节点IP>
+
+# 中心节点：约 3 分钟后检查，每个集群都是 OK 再继续
+bash multicluster/status.sh
+```
+环境自己的覆盖（存储类、节点亲和等）照常追加 `-f my-env.yaml`。改用 VictoriaMetrics K8s Stack 时按它的 README 部署，并在下一步加 `OBS=victoria`。
+
+#### 2. 安装 AIOps 中心（在中心节点执行）
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
-make mc-discover WRITE=1     # 已接入的集群写入 deploy-edge/clusters.mc.yaml（### 之间）
+make mc-discover WRITE=1     # 已接入的集群写入 deploy-edge/clusters.mc.yaml（### 之间）；可观测档案默认 efk，Victoria 用 OBS=victoria
 make mc-init                 # 经 xnet 签发接口申请 AIOps 专用证书（不复用 xnet 自身证书）、生成密钥和集群配置；最后打印边缘要执行的命令
 cd ~/aiops-workspace/mcpstander     && make deploy-mc
 cd ~/aiops-workspace/holmegpt-agent && make deploy-mc
 cd ~/aiops-workspace/aiops-frount   && make deploy-mc
 ```
 
-#### 加入边缘（在每个边缘节点执行，不需要 kubeconfig）
+#### 3. 加入边缘（在每个边缘节点执行，不需要 kubeconfig）
 ```bash
 cd ~/aiops-workspace/holmegpt-agent
 make edge-deploy EDGE=local RUNNER_KEY=<mc-init 打印的值>   # RUNNER_LEVEL=1|2|3，默认 2
@@ -144,7 +168,7 @@ A2A 服务是 AIOps Pod 里的 `a2a-adapter` 边车，部署后即可用，对�
 | 临时切换修复方式 | `PUT /repair/policy/mode`（带 `AIOPS_ADMIN_TOKEN`） | 例 `{"mode":"auto","ttl_minutes":30}`，到期自动回到配置值，不用重新部署；见 [HTTP API](docs/api.md#6-策略与审计) |
 | 高危命令规则 | 同上 `workflow.remediation` 下的 `denied_*`、`approval_required` | 命中禁止规则一律不执行；`approval_required` 即使 auto 也强制人工审批。多集群改完后各边缘重新 `make edge-deploy` |
 | 模型 | `deploy/secrets/core.yaml` | 模型地址、名称、Key、上下文容量 |
-| 指标 / 日志地址 | MCP 仓库 `deploy/configmap.yaml`（`PROMETHEUS_URL`、`ES_URL`）；多集群在 `deploy-edge/clusters.mc.yaml` 的 `### 核对 ###` | 可观测组件换了 namespace 或服务名时改 |
+| 指标 / 日志地址 | MCP 仓库 `deploy/configmap.yaml`（`PROMETHEUS_URL`、`ES_URL`）；多集群在 `deploy-edge/clusters.mc.yaml` 的 `### 核对 ###`（efk / victoria 两个可观测档案） | 可观测组件换了 namespace 或服务名时改 |
 | 集群列表与别名 | `deploy-edge/clusters.mc.yaml` 的 `### 替换开始 ###` 之间 | 仅多集群；`make mc-discover WRITE=1` 自动生成 |
 | 边缘权限等级 | `make edge-deploy … RUNNER_LEVEL=1\|2\|3` | 1 只读；2（默认）常见修复；3 管理员 |
 

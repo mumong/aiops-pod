@@ -12,6 +12,7 @@ alias, else ``edge-<last IP octet>``) to edit before use.
 """
 
 import json
+import os
 import sys
 
 # The same marker lines frame the replaceable block in deploy-edge/clusters.mc.yaml.
@@ -66,7 +67,7 @@ def entries(nodes):
     return sorted(out, key=lambda e: (not e["center"], e["name"]))
 
 
-def render(items):
+def render(items, observability="efk"):
     center = next((e["name"] for e in items if e["center"]), None)
     lines = [
         "# make mc-discover：xnet 已接入的集群。把下面两行 ### 之间的内容（含这两行）整段替换到",
@@ -82,12 +83,23 @@ def render(items):
             f"    - name: {e['name']}   # {role}，IP {e['ip'] or '?'}，Ready={e['ready']}",
             f"      aliases: [{', '.join(e['aliases'])}]",
             f"      access: {'local' if e['center'] else 'xnet'}",
-            "      observability: victoria",
+            f"      observability: {observability}",
         ]
     if not items:
         lines.append("    []   # 没有发现 xnet 虚拟 Node：xnet 未安装，或边缘尚未加入")
     lines.append(f"  {END}")
     return "\n".join(lines)
+
+
+def check_profile(template, observability):
+    """The chosen observability profile must be defined in the cluster config."""
+    import yaml
+
+    profiles = (yaml.safe_load(template) or {}).get("observability_profiles") or {}
+    if observability not in profiles:
+        raise SystemExit(
+            f"集群配置里没有可观测档案 {observability!r}（observability_profiles 中有：{', '.join(profiles) or '无'}）"
+        )
 
 
 def replace_block(template, rendered):
@@ -100,11 +112,15 @@ def replace_block(template, rendered):
 
 
 if __name__ == "__main__":
-    rendered = render(entries(json.load(sys.stdin)))
+    # make mc-discover OBS=efk|victoria: the observability profile every cluster uses
+    observability = os.environ.get("OBS", "").strip() or "efk"
+    rendered = render(entries(json.load(sys.stdin)), observability)
     if len(sys.argv) > 1:  # make mc-discover WRITE=1: update the cluster config in place
         path = sys.argv[1]
         with open(path, encoding="utf-8") as f:
-            updated = replace_block(f.read(), rendered)
+            template = f.read()
+        check_profile(template, observability)
+        updated = replace_block(template, rendered)
         with open(path, "w", encoding="utf-8") as f:
             f.write(updated)
         print(f"已写入 {path}（### 之间的集群列表）；别名可按习惯修改")

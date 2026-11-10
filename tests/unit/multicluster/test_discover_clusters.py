@@ -77,3 +77,31 @@ def test_output_replaces_the_marked_block_of_the_shipped_template():
     assert [i["name"] for i in config["clusters"]["items"]] == ["vc-xnet-management", "vc-a"]
     assert config["clusters"]["access"]["xnet"]["runner_url"]
     assert config["observability_profiles"]["victoria"] and config["expected_states"]
+
+
+def test_observability_profile_is_chosen_and_must_exist_in_the_template():
+    template = (ROOT / "deploy-edge/clusters.mc.yaml").read_text()
+    items = discover.entries({"items": [node("vc-xnet-management", center=True), node("vc-a")]})
+
+    assert discover.render(items).count("observability: efk") == 2
+    assert discover.render(items, "victoria").count("observability: victoria") == 2
+    # Both shipped profiles are defined; an unknown one is refused before anything is written.
+    for name in ("efk", "victoria"):
+        discover.check_profile(template, name)
+    try:
+        discover.check_profile(template, "nope")
+    except SystemExit as exc:
+        assert "nope" in str(exc) and "efk" in str(exc)
+    else:
+        raise AssertionError("unknown profile accepted")
+
+
+def test_shipped_profiles_declare_how_each_shared_backend_is_filtered():
+    profiles = yaml.safe_load((ROOT / "deploy-edge/clusters.mc.yaml").read_text())[
+        "observability_profiles"
+    ]
+    for name, profile in profiles.items():
+        for dimension in ("metrics", "logs"):
+            source = profile[dimension]
+            assert source.get("cluster_label") or source.get("cluster_field"), (name, dimension)
+    assert profiles["efk"]["traces"] == {"type": "deepflow", "cluster_field": "pod_cluster"}

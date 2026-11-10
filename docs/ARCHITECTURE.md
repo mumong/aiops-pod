@@ -353,7 +353,7 @@ answer:        给人看的方案说明
 |---|---|---|
 | ① 路由 | 契约增加 `cluster_mode`（none / inventory / single / multiple / center / unspecified）、`clusters`、`cluster_labels`；模型按意图给出范围（`["*"]` 全部，`["*edge"]` 全部边缘集群），代码只做三件事：没说范围就反问、集群不存在就列出可用集群、修复只针对一个集群 | `app/core/multicluster.py`、`request_router.py` |
 | 工具 | 节点入口与并行通道按本次范围绑定 `cluster`：单个集群强制注入，多个集群校验在范围内；通道用自己组的集群 | `multicluster.scoped_tools`、`graph._bind_cluster_scope`、`autonomous_parallel` |
-| MCP | 每次调用激活集群上下文：VictoriaMetrics 查询附加 `extra_label`；victoria 后端的"日志"是 K8s 事件（`query_partial` / `empty`），链路为 `capability_missing`；远端 kubectl 经垫片转发 | mcpstander `servers/cluster_scope.py` |
+| MCP | 每次调用激活集群上下文，按集群的可观测档案查中心后端并限定到该集群：efk 档案在 PromQL 中注入 `cluster` 标签、ES 加 `cluster` 字段过滤、DeepFlow 的 Pod 一侧按 `pod_cluster` 过滤（后端 kubectl 始终在中心执行）；victoria 档案的 VictoriaMetrics 查询附加 `extra_label`，"日志"是 K8s 事件（`query_partial` / `empty`），链路为 `capability_missing`；远端业务 kubectl 经垫片转发 | mcpstander `servers/cluster_scope.py`、`servers/promql_scope.py` |
 | ② 定位 | 多个集群时：先探测，再按集群并行定位（模型断线重试一次），事件带 `cluster_lane` 记在 layer 下；合并为带集群前缀的目标与带集群的分组；运维声明的预期状态经实时核对后排除；未检查的集群使"健康"降为"检查不完整" | `workflow/multicluster_location.py`、`workflow/expected_states.py` |
 | ⑤ 总结 | 各组标题带集群；代码写"未完成检查的集群""已按运维声明排除"两行；总览输入带这两份清单 | `case_report.py`、`query_answer.py` |
 | ⑧ 执行 | 远端集群的执行阶段作为 runner 异步任务（幂等键 `run:action:stage`，审批 ID 随任务传给 runner）；读操作与恢复观察经垫片；集群不可达时等待，不执行；结果无法确认时标记"结果未知"，不重新提交 | `pod_executor.py`、`aiops_edge/jobs_client.py` |
