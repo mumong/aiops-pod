@@ -57,6 +57,8 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 打开 `http://<节点IP>:30082`。API：`:30800`；A2A：`:30801`（见 [A2A](docs/a2a.md)）。
 
 ### 多集群
+> 完整指南（步骤流程、部署后修改、配置文件、新增/移除集群、EFK 与 Victoria、排查）见 **[多集群部署指南](docs/multi-cluster.md)**。下面是最短路径。
+
 前提：边缘已经通过 xnet 接入中心（在中心执行 `kubectl get nodes`，能看到 `vc-…` 虚拟 Node）。每个集群的**集群名就是它的 xnet 虚拟 Node 名**，可观测数据和 AIOps 都用这个名字。在中心查看每个集群的名字、角色和 IP（只读）：
 
 ```bash
@@ -187,6 +189,7 @@ A2A 服务是 AIOps Pod 里的 `a2a-adapter` 边车，部署后即可用，对�
 | [部署与运维](docs/GUIDE.md) | 配置、发布、日常变更、可选变量、排查 |
 | [核心架构](docs/ARCHITECTURE.md) | 完整流程、修复与高危命令规则、边界 |
 | [HTTP API](docs/api.md) / [A2A](docs/a2a.md) | 接口与调用示例 |
+| [多集群部署指南](docs/multi-cluster.md) | 部署步骤、部署后修改、新增/移除集群、排查 |
 | [多集群设计](docs/multi-cluster-design.md) | 中心、边缘 runner、权限等级 |
 | [异常 Case](tests/cases/README.md) | 故障环境部署与清理 |
 

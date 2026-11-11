@@ -70,7 +70,7 @@ tests/acceptance/sprint3_scenarios.sh all                      # 重置 c06/c09/
 
 ## 3. 发布与验证
 
-部署、多集群和边缘 runner 的命令统一见 [README 快速开始](../README.md#快速开始)，这里只补充细节：
+部署命令统一见 [README 快速开始](../README.md#快速开始)；多集群的部署、部署后修改、新增/移除集群见 [多集群部署指南](multi-cluster.md)。这里只补充细节：
 
 - 发布前确认没有进行中的诊断或修复（发布会中断它们）；按 MCP → Agent → 前端的顺序，只发布改过的仓库。
 
@@ -90,15 +90,10 @@ curl -fsS http://<节点IP>:30801/.well-known/agent-card.json
 | 场景 | 命令 |
 |---|---|
 | 改了 `config.yaml`、Runbook 或 `core.yaml` | 单集群 `make deploy`，多集群中心 `make deploy-mc`（Agent 仓库） |
-| 新增一个边缘 | 中心：`make mc-discover WRITE=1`（更新 `clusters.mc.yaml` 中 ### 之间的集群列表，会覆盖手改的别名） → Agent 仓库和 MCP 仓库各执行 `make deploy-mc` → 新边缘节点上执行 `mc-init` 打印的 `make edge-deploy EDGE=local RUNNER_KEY=…` |
-| 修改高危命令规则（`workflow.remediation`） | 中心 `make deploy-mc`，并对每个边缘重新执行 `make edge-deploy`（规则随 runner 下发） |
-| 重新申请 AIOps 专用 xnet 证书（到期前 30 天内 `mc-init` 会自动申请；xnet 重装后也要执行） | Agent 仓库 `make mc-cert RENEW=1`，再在 Agent 仓库和 MCP 仓库各执行 `make deploy-mc` |
-| 使用运维提供的 xnet 证书 | `make mc-init XNET_CERT_DIR=<含 cert.pem、key.pem、ca.pem 的目录>` |
+| 多集群：新增边缘、改集群配置、高危规则、证书、runner 权限等级 | 见 [多集群部署指南 · 部署后修改](multi-cluster.md#部署后修改) |
 | 查看日志 | `kubectl -n aiops logs deploy/aiops-copilot -c aiops-copilot -f` |
 | 卸载 | 各仓库执行 `make delete`（保留报告 PVC）；边缘执行 `make edge-delete EDGE=<别名>` |
 | 升级边缘 runner | 改 `deploy-edge/VERSION`，`make runner-build runner-push`，再在每个边缘重新执行 `make edge-deploy` |
-| 切换 runner 权限等级 | 重新执行 `make edge-deploy … RUNNER_LEVEL=1\|2\|3`：1 只读；2（默认）读全部、可改常见修复对象，不能改 Secret 和 RBAC；3 管理员 |
-| 在中心集中部署所有边缘 | 把边缘 kubeconfig 放到中心的 `~/.kube/aiops-mc/<别名>`，执行 `make edge-deploy EDGE=<别名>` |
 
 可选变量（加在 make 命令后面，例如 `make deploy-mc MC_A2A_PUBLIC_URL=https://aiops.example.com`）：
 

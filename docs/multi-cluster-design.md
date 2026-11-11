@@ -115,7 +115,7 @@ expected_states: [...]             # 运维声明的预期状态，见 §11
 | 3 | 更新 `clusters.mc.yaml`，Agent 仓库 `make deploy-mc`，MCP 仓库 `make deploy-mc` | Agent 的 `deploy-mc` 先执行 `mc-init`：把集群配置、AIOps 专用 xnet 客户端证书（本机没有或剩余不足 30 天时经 xnet 签发接口申请，见 §18.2）、签名密钥写进 `mcp` 和 `aiops` 命名空间（签名密钥本机没有时从中心 Secret 取回，中心也没有才生成） |
 | 4 | `make edge-deploy EDGE=<名字>` | 在边缘部署 runner：两个 SA 与 RBAC、命令规则 ConfigMap（从中心 `config.yaml` 的 `workflow.remediation` 渲染）、签名密钥 Secret、Deployment 和 ClusterIP Service |
 
-完整的部署步骤见 [README 多集群部署](../README.md#快速开始)。
+完整的部署步骤见 [多集群部署指南](multi-cluster.md)。
 边缘 kubeconfig 只用于部署和测试，运行时不使用。测试环境的 Harbor 推不了镜像，所以由 `deploy-edge/load_image.sh` 经 SSH 把镜像导入节点，部署清单使用 `IfNotPresent`。
 
 ### 3.3 在线状态
@@ -514,7 +514,7 @@ xnet 在这套设计里只承担一件事：**把中心的一次 HTTP 请求送�
 | AIOps | robusta `make deploy`（或 `make release`） | Secret `aiops-secret`（LLM 网关地址与密钥）、ConfigMap |
 | 前端 | frountind `make deploy` | — |
 
-**多集群**（步骤见 [README](../README.md#快速开始)）：
+**多集群**（步骤见 [多集群部署指南](multi-cluster.md)）：
 
 | 位置 | 命令 | 作用 |
 |---|---|---|

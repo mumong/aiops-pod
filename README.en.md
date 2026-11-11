@@ -57,6 +57,8 @@ cd ~/aiops-workspace/aiops-frount   && make deploy
 Open `http://<node IP>:30082`. API: `:30800`; A2A: `:30801` (see [A2A](docs/a2a.md)).
 
 ### Multi-cluster
+> Full guide (step flow, changing things after deployment, config files, adding/removing clusters, EFK vs Victoria, troubleshooting): **[multi-cluster deployment guide](docs/multi-cluster.md)** (Chinese). Below is the shortest path.
+
 Prerequisite: the edges have joined the center through xnet (`kubectl get nodes` on the center shows `vc-…` virtual Nodes). **A cluster's name is its xnet virtual Node name**; the observability data and AIOps both use it. On the center, list each cluster's name, role and IP (read-only):
 
 ```bash
@@ -187,6 +189,7 @@ user / frontend / A2A ──> AIOps Agent ──> MCP tools ──> K8s API, met
 | [Deployment and operations](docs/GUIDE.md) | Configuration, releases, routine changes, optional variables, troubleshooting |
 | [Architecture](docs/ARCHITECTURE.md) | Full flow, repair and dangerous-command rules, limits |
 | [HTTP API](docs/api.md) / [A2A](docs/a2a.md) | Interfaces and examples |
+| [Multi-cluster deployment guide](docs/multi-cluster.md) | Steps, post-deployment changes, adding/removing clusters, troubleshooting |
 | [Multi-cluster design](docs/multi-cluster-design.md) | Center, edge runner, permission levels |
 | [Failure cases](tests/cases/README.md) | Deploying and cleaning failure environments |
 
